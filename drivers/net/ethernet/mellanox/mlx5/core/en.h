@@ -578,6 +578,7 @@ void mlx5e_rq_set_trap_handlers(struct mlx5e_rq *rq, struct mlx5e_params *params
 enum mlx5e_rq_flag {
 	MLX5E_RQ_FLAG_XDP_XMIT,
 	MLX5E_RQ_FLAG_XDP_REDIRECT,
+	MLX5e_RQ_FLAG_XDP_MD,
 };
 
 struct mlx5e_rq_frag_info {
@@ -817,6 +818,7 @@ struct mlx5e_htb {
 	u16 defcls;
 };
 
+struct btf;
 struct mlx5e_trap;
 
 struct mlx5e_priv {
@@ -845,6 +847,10 @@ struct mlx5e_priv {
 	struct mlx5e_tir           xsk_tir[MLX5E_MAX_NUM_CHANNELS];
 	struct mlx5e_tir           ptp_tir;
 	struct mlx5e_rss_params    rss_params;
+	struct {
+		u8                 btf_enabled;
+		struct btf         *btf;
+	} xdp;
 	u32                        tx_rates[MLX5E_MAX_NUM_SQS];
 
 	struct mlx5e_flow_steering fs;
