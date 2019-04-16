@@ -135,6 +135,9 @@ LIBBPF_API int btf__add_datasec(struct btf *btf, const char *name, __u32 byte_sz
 LIBBPF_API int btf__add_datasec_var_info(struct btf *btf, int var_type_id,
 					 __u32 offset, __u32 byte_sz);
 
+typedef int (*btf_type_handler)(struct btf *btf, struct btf_type *t);
+LIBBPF_API int btf__walk_types(struct btf *btf, btf_type_handler handler);
+
 struct btf_dedup_opts {
 	unsigned int dedup_table_size;
 	bool dont_resolve_fwds;

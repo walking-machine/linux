@@ -382,7 +382,7 @@ static int btf_bswap_type_rest(struct btf_type *t)
 	}
 }
 
-static int btf_parse_type_sec(struct btf *btf)
+int btf__walk_types(struct btf *btf, btf_type_handler handler)
 {
 	struct btf_header *hdr = btf->hdr;
 	void *next_type = btf->types_data;
@@ -404,7 +404,7 @@ static int btf_parse_type_sec(struct btf *btf)
 		if (btf->swapped_endian && btf_bswap_type_rest(next_type))
 			return -EINVAL;
 
-		err = btf_add_type_idx_entry(btf, next_type - btf->types_data);
+		err = handler(btf, t);
 		if (err)
 			return err;
 
@@ -418,6 +418,11 @@ static int btf_parse_type_sec(struct btf *btf)
 	}
 
 	return 0;
+}
+
+static int btf_parse_type_sec(struct btf *btf)
+{
+	return btf__walk_types(btf, btf_add_type);
 }
 
 __u32 btf__get_nr_types(const struct btf *btf)
@@ -4018,7 +4023,7 @@ static void btf_dedup_merge_hypot_map(struct btf_dedup *d)
 		 */
 		if (d->hypot_adjust_canon)
 			continue;
-		
+
 		if (t_kind == BTF_KIND_FWD && c_kind != BTF_KIND_FWD)
 			d->map[t_id] = c_id;
 
