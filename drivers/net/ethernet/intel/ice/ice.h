@@ -489,6 +489,10 @@ struct ice_pf {
 
 struct ice_netdev_priv {
 	struct ice_vsi *vsi;
+	struct {
+                u8 btf_enabled;
+                struct btf *btf;
+        }xdp;
 };
 
 /**
@@ -659,5 +663,6 @@ int ice_open(struct net_device *netdev);
 int ice_open_internal(struct net_device *netdev);
 int ice_stop(struct net_device *netdev);
 void ice_service_task_schedule(struct ice_pf *pf);
+void ice_xdp_set_meta(struct xdp_buff *xdp);
 
 #endif /* _ICE_H_ */
