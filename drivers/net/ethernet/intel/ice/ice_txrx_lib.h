@@ -61,6 +61,7 @@ ice_receive_skb(struct ice_ring *rx_ring, struct sk_buff *skb, u16 vlan_tag);
 struct ice_md_desc {
         u32 flow_mark;
         u32 hash32;
+	u16 vlan;
 };
 
 static inline void ice_xdp_set_meta(struct xdp_buff *xdp, union ice_32b_rx_flex_desc *rx_desc)

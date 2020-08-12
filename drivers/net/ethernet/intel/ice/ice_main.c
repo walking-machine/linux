@@ -58,14 +58,16 @@ MODULE_PARM_DESC(debug, "netif level (0=none,...,16=all)");
 #define BTF_MEMBER_ENC(name, type, bits_offset) \
         (name), (type), (bits_offset)
 
-#define ICE_MD_NUM_MMBRS 2
-static const char names_str[] = "\0xdp_md_desc\0flow_mark\0hash32\0";
+#define ICE_MD_NUM_MMBRS 3
+static const char names_str[] = "\0xdp_md_desc\0flow_mark\0hash32\0vlan\0";
 
 static const u32 ice_md_raw_types[] = {
         BTF_TYPE_INT_ENC(0, 0, 0, 32, 4),         /* type [1] */
-        BTF_STRUCT_ENC(1, ICE_MD_NUM_MMBRS, ICE_MD_NUM_MMBRS * 4),
-                BTF_MEMBER_ENC(13, 1, 0),    /* u32 flow_mark;    */
+	BTF_TYPE_INT_ENC(0, 0, 0, 16, 2),         /* type [2] */
+        BTF_STRUCT_ENC(1, ICE_MD_NUM_MMBRS, 4 + 4 + 2),
+                BTF_MEMBER_ENC(13, 1, 0),   /* u32 flow_mark;    */
                 BTF_MEMBER_ENC(23, 1, 32),  /* u32 hash32;       */
+		BTF_MEMBER_ENC(30, 2, 64),  /* u16 vlan;         */
 };
 
 

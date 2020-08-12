@@ -175,6 +175,9 @@ static void flow_marks_prepare(struct bpf_object *obj, struct iptnl_info *tnl,
 	printf("tc qdisc del dev %s ingress\n", ifname);
 	printf("tc qdisc add dev %s ingress\n", ifname);
 
+	printf("For now, on Intel adapters, please use flow director rules to apply flow marking\n");
+	printf("note, ethtool ntuple requires action, for now redirect to the same queue_id as flow mark value\n\n");
+
 	while (mport <= max_port) {
 		vip->dport = htons(mport++);
 		/* Flow mark table */
@@ -186,7 +189,11 @@ static void flow_marks_prepare(struct bpf_object *obj, struct iptnl_info *tnl,
 		       " ip_proto %s dst_port %d action skbedit mark %d\n",
 		       ifname, tnl->family == AF_INET ? "ip" : "ipv6", ipstr,
 		       vip->protocol == 17 ? "udp" : "tcp", ntohs(vip->dport),
-		       flow_mark++);
+		       flow_mark);
+
+		printf("ethtool -N %s flow-type %s dst-ip %s dst-port %d action %d loc %d\n",
+		       ifname, vip->protocol == 17 ? "udp4" : "tcp4", ipstr, ntohs(vip->dport), flow_mark, flow_mark);
+		flow_mark++;
 	}
 }
 #else
