@@ -663,6 +663,5 @@ int ice_open(struct net_device *netdev);
 int ice_open_internal(struct net_device *netdev);
 int ice_stop(struct net_device *netdev);
 void ice_service_task_schedule(struct ice_pf *pf);
-void ice_xdp_set_meta(struct xdp_buff *xdp);
 
 #endif /* _ICE_H_ */

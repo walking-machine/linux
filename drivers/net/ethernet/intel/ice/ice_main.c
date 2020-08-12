@@ -68,10 +68,6 @@ static const u32 ice_md_raw_types[] = {
                 BTF_MEMBER_ENC(23, 1, 32),  /* u32 hash32;       */
 };
 
-struct ice_md_desc {
-        u32 flow_mark;
-        u32 hash32;
-};
 
 static struct workqueue_struct *ice_wq;
 static const struct net_device_ops ice_netdev_safe_mode_ops;
@@ -85,16 +81,6 @@ static void ice_vsi_release_all(struct ice_pf *pf);
 bool netif_is_ice(struct net_device *dev)
 {
 	return dev && (dev->netdev_ops == &ice_netdev_ops);
-}
-
-void ice_xdp_set_meta(struct xdp_buff *xdp)
-{
-        struct ice_md_desc *md = xdp->data - sizeof(struct ice_md_desc);
-
-        xdp->data_meta = md;
-
-        md->flow_mark = 0;
-        md->hash32 = 1;
 }
 
 static int
