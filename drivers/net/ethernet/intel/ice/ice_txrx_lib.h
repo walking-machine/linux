@@ -57,24 +57,16 @@ ice_process_skb_fields(struct ice_ring *rx_ring,
 void
 ice_receive_skb(struct ice_ring *rx_ring, struct sk_buff *skb, u16 vlan_tag);
 
-/* XDP metadata */
-struct ice_md_desc {
-        u32 flow_mark;
-        u32 hash32;
-	u16 vlan;
-};
-
 static inline void ice_xdp_set_meta(struct xdp_buff *xdp, union ice_32b_rx_flex_desc *rx_desc)
 {
-	struct ice_32b_rx_flex_desc_nic *nic_mdid;
-        struct ice_md_desc *md = xdp->data - sizeof(struct ice_md_desc);
+        struct ice_32b_rx_flex_desc_nic *md = xdp->data -
+		sizeof(struct ice_32b_rx_flex_desc_nic);
+        struct ice_32b_rx_flex_desc_nic *nic_mdid;
 
         xdp->data_meta = md;
 
 	nic_mdid = (struct ice_32b_rx_flex_desc_nic *)rx_desc;
-
-        md->flow_mark = le32_to_cpu(nic_mdid->flow_id);
-        md->hash32 = le32_to_cpu(nic_mdid->rss_hash);
+	*md = *nic_mdid;
 }
 
 #endif /* !_ICE_TXRX_LIB_H_ */

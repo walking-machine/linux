@@ -58,16 +58,31 @@ MODULE_PARM_DESC(debug, "netif level (0=none,...,16=all)");
 #define BTF_MEMBER_ENC(name, type, bits_offset) \
         (name), (type), (bits_offset)
 
-#define ICE_MD_NUM_MMBRS 3
-static const char names_str[] = "\0xdp_md_desc\0flow_mark\0hash32\0vlan\0";
+#define ICE_MD_NUM_MMBRS 16
+static const char names_str[] = "\0xdp_md_desc\0rxdid\0mir_id_umb_cast\0ptype\0pkt_len\0hdr_len\0status_err0\0l2tag1\0rss_hash\0status_err1\0flex_flags2\0ts_low\0l2tag2_1st\0l2tag2_2nd\0flow_id\0vlan_id\0flow_id_ipv6\0";
 
 static const u32 ice_md_raw_types[] = {
         BTF_TYPE_INT_ENC(0, 0, 0, 32, 4),         /* type [1] */
 	BTF_TYPE_INT_ENC(0, 0, 0, 16, 2),         /* type [2] */
-        BTF_STRUCT_ENC(1, ICE_MD_NUM_MMBRS, 4 + 4 + 2),
-                BTF_MEMBER_ENC(13, 1, 0),   /* u32 flow_mark;    */
-                BTF_MEMBER_ENC(23, 1, 32),  /* u32 hash32;       */
-		BTF_MEMBER_ENC(30, 2, 64),  /* u16 vlan;         */
+	BTF_TYPE_INT_ENC(0, 0, 0, 8, 1),         /* type [3] */
+        BTF_STRUCT_ENC(1, ICE_MD_NUM_MMBRS, 1 + 1 + 2 + 2 + 2 + 2 + 2 + 4 + 2 +
+		       1 + 1 + 2 + 2 + 4 + 2 + 2),
+                BTF_MEMBER_ENC(13, 3, 0),   /* u8 rxdid;    */
+                BTF_MEMBER_ENC(19, 3, 8),  /* u8 mir_id_umb_cast;       */
+		BTF_MEMBER_ENC(35, 2, 16),  /* u16 ptype;         */
+		BTF_MEMBER_ENC(41, 2, 32), /* u16 pkt_len; */
+		BTF_MEMBER_ENC(49, 2, 48), /* u16 hdr_len; */
+		BTF_MEMBER_ENC(57, 2, 64), /* u16 status_err0; */
+		BTF_MEMBER_ENC(69, 2, 80), /* u16 l2tag1; */
+		BTF_MEMBER_ENC(76, 1, 96), /* u32 rss_hash */
+		BTF_MEMBER_ENC(85, 2, 128), /* u16 status_err1; */
+		BTF_MEMBER_ENC(97, 3, 144), /* u8 flex_flags2; */
+		BTF_MEMBER_ENC(109, 3, 152), /* u8 ts_low */
+		BTF_MEMBER_ENC(116, 2, 160), /* u16 l2tag2_1st; */
+		BTF_MEMBER_ENC(127, 2, 176), /* u16 l2tag2_2nd; */
+		BTF_MEMBER_ENC(138, 1, 192), /* u32 flow_id; */
+		BTF_MEMBER_ENC(146, 2, 224), /* u16 vlan_id; */
+		BTF_MEMBER_ENC(154, 2, 240), /* u16 flow_id_ipv6; */
 };
 
 
