@@ -13,6 +13,7 @@
 #include "ice_dcb_lib.h"
 #include "ice_dcb_nl.h"
 #include "ice_devlink.h"
+#include "ice_hints_btf.h"
 
 #include <linux/bpf.h>
 #include <linux/btf.h>
@@ -39,53 +40,6 @@ MODULE_PARM_DESC(debug, "netif level (0=none,...,16=all), hw debug_mask (0x8XXXX
 MODULE_PARM_DESC(debug, "netif level (0=none,...,16=all)");
 #endif /* !CONFIG_DYNAMIC_DEBUG */
 
-#define BTF_INFO_ENC(kind, kind_flag, vlen) \
-        ((!!(kind_flag) << 31) | ((kind) << 24) | ((vlen) & BTF_MAX_VLEN))
-
-#define BTF_TYPE_ENC(name, info, size_or_type) \
-        (name), (info), (size_or_type)
-
-#define BTF_INT_ENC(encoding, bits_offset, nr_bits) \
-        ((encoding) << 24 | (bits_offset) << 16 | (nr_bits))
-
-#define BTF_TYPE_INT_ENC(name, encoding, bits_offset, bits, sz) \
-        BTF_TYPE_ENC(name, BTF_INFO_ENC(BTF_KIND_INT, 0, 0), sz),       \
-        BTF_INT_ENC(encoding, bits_offset, bits)
-
-#define BTF_STRUCT_ENC(name, nr_elems, sz)      \
-        BTF_TYPE_ENC(name, BTF_INFO_ENC(BTF_KIND_STRUCT, 1, nr_elems), sz)
-
-#define BTF_MEMBER_ENC(name, type, bits_offset) \
-        (name), (type), (bits_offset)
-
-#define ICE_MD_NUM_MMBRS 16
-static const char names_str[] = "\0xdp_md_desc\0rxdid\0mir_id_umb_cast\0ptype\0pkt_len\0hdr_len\0status_err0\0l2tag1\0rss_hash\0status_err1\0flex_flags2\0ts_low\0l2tag2_1st\0l2tag2_2nd\0flow_id\0vlan_id\0flow_id_ipv6\0";
-
-static const u32 ice_md_raw_types[] = {
-        BTF_TYPE_INT_ENC(0, 0, 0, 32, 4),         /* type [1] */
-	BTF_TYPE_INT_ENC(0, 0, 0, 16, 2),         /* type [2] */
-	BTF_TYPE_INT_ENC(0, 0, 0, 8, 1),         /* type [3] */
-        BTF_STRUCT_ENC(1, ICE_MD_NUM_MMBRS, 1 + 1 + 2 + 2 + 2 + 2 + 2 + 4 + 2 +
-		       1 + 1 + 2 + 2 + 4 + 2 + 2),
-                BTF_MEMBER_ENC(13, 3, 0),   /* u8 rxdid;    */
-                BTF_MEMBER_ENC(19, 3, 8),  /* u8 mir_id_umb_cast;       */
-		BTF_MEMBER_ENC(35, 2, 16),  /* u16 ptype;         */
-		BTF_MEMBER_ENC(41, 2, 32), /* u16 pkt_len; */
-		BTF_MEMBER_ENC(49, 2, 48), /* u16 hdr_len; */
-		BTF_MEMBER_ENC(57, 2, 64), /* u16 status_err0; */
-		BTF_MEMBER_ENC(69, 2, 80), /* u16 l2tag1; */
-		BTF_MEMBER_ENC(76, 1, 96), /* u32 rss_hash */
-		BTF_MEMBER_ENC(85, 2, 128), /* u16 status_err1; */
-		BTF_MEMBER_ENC(97, 3, 144), /* u8 flex_flags2; */
-		BTF_MEMBER_ENC(109, 3, 152), /* u8 ts_low */
-		BTF_MEMBER_ENC(116, 2, 160), /* u16 l2tag2_1st; */
-		BTF_MEMBER_ENC(127, 2, 176), /* u16 l2tag2_2nd; */
-		BTF_MEMBER_ENC(138, 1, 192), /* u32 flow_id; */
-		BTF_MEMBER_ENC(146, 2, 224), /* u16 vlan_id; */
-		BTF_MEMBER_ENC(154, 2, 240), /* u16 flow_id_ipv6; */
-};
-
-
 static struct workqueue_struct *ice_wq;
 static const struct net_device_ops ice_netdev_safe_mode_ops;
 static const struct net_device_ops ice_netdev_ops;
@@ -101,81 +55,14 @@ bool netif_is_ice(struct net_device *dev)
 }
 
 static int
-ice_xdp_register_btf(struct ice_netdev_priv *priv)
-{
-        unsigned int type_sec_sz, str_sec_sz;
-        char *types_sec, *str_sec;
-        struct btf_header *hdr;
-        unsigned int btf_size;
-        void *raw_btf = NULL;
-        int err = 0;
-
-        type_sec_sz = sizeof(ice_md_raw_types);
-        str_sec_sz  = sizeof(names_str);
-
-        btf_size = sizeof(*hdr) + type_sec_sz + str_sec_sz;
-        raw_btf = kzalloc(btf_size, GFP_KERNEL);
-        if (!raw_btf)
-                return -ENOMEM;
-
-        hdr = raw_btf;
-        hdr->magic    = BTF_MAGIC;
-        hdr->version  = BTF_VERSION;
-        hdr->hdr_len  = sizeof(*hdr);
-        hdr->type_off = 0;
-        hdr->type_len = type_sec_sz;
-        hdr->str_off  = type_sec_sz;
-        hdr->str_len  = str_sec_sz;
-
-        types_sec = raw_btf   + sizeof(*hdr);
-        str_sec   = types_sec + type_sec_sz;
-        memcpy(types_sec, ice_md_raw_types, type_sec_sz);
-        memcpy(str_sec, names_str, str_sec_sz);
-
-        priv->xdp.btf = btf_register(raw_btf, btf_size);
-        if (IS_ERR(priv->xdp.btf)) {
-                err = PTR_ERR(priv->xdp.btf);
-                priv->xdp.btf = NULL;
-        }
-
-        kfree(raw_btf);
-        return err;
-}
-
-static int
-ice_xdp_set_btf_md(struct net_device *dev, u8 enable)
-{
-        struct ice_netdev_priv *priv = netdev_priv(dev);
-        int err = 0;
-
-        if (enable && !priv->xdp.btf) {
-                ice_xdp_register_btf(priv);
-                if (!priv->xdp.btf) {
-                        err = -EINVAL;
-                        goto unlock;
-                }
-        }
-
-        priv->xdp.btf_enabled = enable;
-
-        unlock:
-        return err;
-}
-
-static int
 ice_xdp_query_btf(struct net_device *dev, u8 *enabled)
 {
-        struct ice_netdev_priv *priv = netdev_priv(dev);
-        u32 md_btf_id = 0;
+        //struct ice_netdev_priv *priv = netdev_priv(dev);
 
+        //md_btf_id = priv->xdp.btf ? btf_id(priv->xdp.btf) : 0;
 
-        if (!priv->xdp.btf)
-                ice_xdp_register_btf(priv);
-
-        *enabled = !!priv->xdp.btf_enabled;
-        md_btf_id = priv->xdp.btf ? btf_id(priv->xdp.btf) : 0;
-
-        return md_btf_id;
+        //return md_btf_id;
+	return 0;
 }
 
 /**
@@ -2707,11 +2594,10 @@ static int ice_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 					  xdp->xsk.queue_id);
 	case XDP_SETUP_MD_BTF:
                 printk("xdp_setup_md_btf\n");
-                return ice_xdp_set_btf_md(dev, xdp->btf_enable);
+                return 0;
 
         case XDP_QUERY_MD_BTF:
                 printk("xdp_query_md_btf\n");
-                xdp->btf_id = ice_xdp_query_btf(dev, &xdp->btf_enable);
                 return 0;
 	default:
 		return -EINVAL;
@@ -6986,6 +6872,10 @@ int ice_open_internal(struct net_device *netdev)
 	/* Update existing tunnels information */
 	udp_tunnel_get_rx_info(netdev);
 
+	/* Register btfs to be used in xdp hints */
+	if (ice_xdp_register_btfs(np))
+		netdev_info(netdev, "Failed to register btfs, xdp hints not supported\n");
+
 	return err;
 }
 
@@ -7011,6 +6901,9 @@ int ice_stop(struct net_device *netdev)
 	}
 
 	ice_vsi_close(vsi);
+
+	/* Unregister btfs */
+	ice_xdp_unregister_btfs(np);
 
 	return 0;
 }

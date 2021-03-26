@@ -491,7 +491,7 @@ struct ice_netdev_priv {
 	struct ice_vsi *vsi;
 	struct {
                 u8 btf_enabled;
-                struct btf *btf;
+                struct btf **btfs;
         }xdp;
 };
 
