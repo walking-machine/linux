@@ -9442,7 +9442,9 @@ static int check_btf_func(struct bpf_verifier_env *env,
 	struct bpf_func_info *krecord;
 	struct bpf_func_info_aux *info_aux = NULL;
 	struct bpf_prog *prog;
+	const struct btf_type *type;
 	const struct btf *btf;
+	struct bpf_prog *prog;
 	void __user *urecord;
 	u32 prev_offset = 0;
 	bool scalar_return;
@@ -9482,6 +9484,10 @@ static int check_btf_func(struct bpf_verifier_env *env,
 		goto err_free;
 
 	for (i = 0; i < nfuncs; i++) {
+		const struct btf_type *func_proto;
+		const struct btf_param *args;
+		int len, j;
+
 		ret = bpf_check_uarg_tail_zero(urecord, krec_size, urec_size);
 		if (ret) {
 			if (ret == -E2BIG) {
@@ -9546,6 +9552,24 @@ static int check_btf_func(struct bpf_verifier_env *env,
 			goto err_free;
 		}
 
+		args = (const struct btf_param *)(func_proto + 1);
+		len = btf_type_vlen(func_proto);
+
+		for (j = 0; j < len; j++) {
+			const struct btf_type *arg_type;
+			const char *ctx_name =
+				btf_name_by_offset(btf, args[i].name_off);
+
+			arg_type = btf_type_by_id(btf, args[i].type);
+			if (!btf_type_is_ptr(arg_type))
+				continue;
+
+			arg_type = btf_type_by_id(btf, arg_type->type);
+			if (!strcmp(btf_name_by_offset(btf, arg_type->name_off),
+				    "xdp_md"))
+				env->ctx_name = ctx_name;
+		}
+
 		prev_offset = krecord[i].insn_off;
 		urecord += urec_size;
 	}
@@ -9571,6 +9595,52 @@ static void adjust_btf_func(struct bpf_verifier_env *env)
 
 	for (i = 0; i < env->subprog_cnt; i++)
 		aux->func_info[i].insn_off = env->subprog_info[i].start;
+}
+
+static void
+check_btf_hints_line(struct bpf_verifier_env *env, const char *line)
+{
+	const char allowed_chars[] = {' ', '=', ')'};
+	const char hints_field[] = "->data_meta";
+	const char struct_pattern[] = "struct ";
+	char *hints_meta, *hints_name;
+	int hints_idx, i;
+
+	if (!env->ctx_name)
+		return;
+
+	hints_meta = kzalloc(strlen(env->ctx_name) + strlen(hints_field),
+			     GFP_KERNEL);
+	if (!hints_meta)
+		return;
+
+	hints_meta = strcat(hints_meta, env->ctx_name);
+	hints_meta = strcat(hints_meta, hints_field);
+
+	if (!strstr(line, hints_meta))
+		goto err_free;
+
+	hints_name = strstr(line, struct_pattern);
+	if (!hints_name)
+		goto err_free;
+
+	hints_idx = (hints_name - line) + strlen(struct_pattern);
+
+	for (i = 0; i < ARRAY_SIZE(allowed_chars); i++) {
+		const char *hints_name_end = strchr(&line[hints_idx],
+						    allowed_chars[i]);
+
+		if (!hints_name_end)
+			continue;
+
+		name_size = hints_name_end - (hints_name + hints_idx) + 1;
+		env->hints_name = kzalloc(name_size, GFP_KERNEL);
+		strncpy(env->hints_name, &line[hints_idx], name_size);
+		break;
+	}
+
+err_free:
+	kfree(hints_meta);
 }
 
 #define MIN_BPF_LINEINFO_SIZE	(offsetof(struct bpf_line_info, line_col) + \
@@ -9616,6 +9686,8 @@ static int check_btf_line(struct bpf_verifier_env *env,
 	expected_size = sizeof(struct bpf_line_info);
 	ncopy = min_t(u32, expected_size, rec_size);
 	for (i = 0; i < nr_linfo; i++) {
+		const char *line;
+
 		err = bpf_check_uarg_tail_zero(ulinfo, expected_size, rec_size);
 		if (err) {
 			if (err == -E2BIG) {
@@ -9677,6 +9749,9 @@ static int check_btf_line(struct bpf_verifier_env *env,
 				goto err_free;
 			}
 		}
+
+		line = btf_name_by_offset(btf, linfo[i].line_info);
+		check_btf_hints_line(env, line);
 
 		prev_offset = linfo[i].insn_off;
 		ulinfo += rec_size;

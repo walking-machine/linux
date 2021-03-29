@@ -7120,6 +7120,7 @@ load_program(struct bpf_program *prog, struct bpf_insn *insns, int insns_cnt,
 	}
 	load_attr.log_level = prog->log_level;
 	load_attr.prog_flags = prog->prog_flags;
+	load_attr.prog_ifindex = prog->prog_ifindex;
 
 retry_load:
 	if (log_buf_size) {
@@ -9674,7 +9675,7 @@ int bpf_prog_load_xattr(const struct bpf_prog_load_attr *attr,
 
 	bpf_object__for_each_map(map, obj) {
 		if (!bpf_map__is_offload_neutral(map))
-			map->map_ifindex = attr->ifindex;
+			map->map_ifindex = 0;// hacks: attr->ifindex;
 	}
 
 	if (!first_prog) {
