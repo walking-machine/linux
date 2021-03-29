@@ -9629,6 +9629,7 @@ check_btf_hints_line(struct bpf_verifier_env *env, const char *line)
 	for (i = 0; i < ARRAY_SIZE(allowed_chars); i++) {
 		const char *hints_name_end = strchr(&line[hints_idx],
 						    allowed_chars[i]);
+		int name_size;
 
 		if (!hints_name_end)
 			continue;
@@ -9750,7 +9751,7 @@ static int check_btf_line(struct bpf_verifier_env *env,
 			}
 		}
 
-		line = btf_name_by_offset(btf, linfo[i].line_info);
+		line = btf_name_by_offset(btf, linfo[i].line_off);
 		check_btf_hints_line(env, line);
 
 		prev_offset = linfo[i].insn_off;
