@@ -945,6 +945,8 @@ enum bpf_netdev_command {
 	BPF_OFFLOAD_MAP_ALLOC,
 	BPF_OFFLOAD_MAP_FREE,
 	XDP_SETUP_XSK_POOL,
+	/* hints */
+	XDP_SETUP_HINTS,
 };
 
 struct bpf_prog_offload_ops;
@@ -988,6 +990,12 @@ struct netdev_bpf {
 			struct xsk_buff_pool *pool;
 			u16 queue_id;
 		} xsk;
+
+		/* XDP_SETUP_HINTS */
+		struct {
+			struct btf *btf;
+			char *name;
+		} hints;
 	};
 	struct netlink_ext_ack *extack;
 };

@@ -13356,6 +13356,20 @@ struct btf *bpf_get_btf_vmlinux(void)
 	return btf_vmlinux;
 }
 
+static void bpf_hints_ndo(int ifindex, char *hints_name, struct btf *btf)
+{
+	struct net_device *netdev = dev_get_by_index(current->nsproxy->net_ns,
+						     ifindex);
+	struct netdev_bpf data = {};
+
+	data.command = XDP_SETUP_HINTS;
+	data.hints.btf = btf;
+	data.hints.name = hints_name;
+
+	if (netdev->netdev_ops->ndo_bpf(netdev, &data))
+		printk("ndo call failed\n");
+}
+
 int bpf_check(struct bpf_prog **prog, union bpf_attr *attr,
 	      union bpf_attr __user *uattr)
 {
@@ -13564,6 +13578,13 @@ skip_full_check:
 	}
 
 	adjust_btf_func(env);
+
+	if (env->hints_name) {
+		printk("hints found\n");
+		bpf_hints_ndo(attr->prog_ifindex, env->hints_name,
+			      env->prog->aux->btf);
+		kfree(env->hints_name);
+	}
 
 err_release_maps:
 	if (!env->prog->aux->used_maps)
