@@ -705,7 +705,7 @@ int btf_id_by_name(const struct btf *btf, char *name)
 {
 	int i;
 
-	for (i = 1; i <= btf->nr_types; i++) {
+	for (i = 0; i < btf->nr_types; i++) {
 		struct btf_type *type = btf->types[i];
 
 		if (!strcmp(btf_name_by_offset(btf, type->name_off), name))

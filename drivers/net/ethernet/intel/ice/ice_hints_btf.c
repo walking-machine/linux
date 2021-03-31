@@ -164,9 +164,11 @@ ice_hints_btf_matches(struct btf *prog_btf, const struct btf_type *type,
 	member = btf_type_member(type);
 	hints_member = btf_type_member(hints_type);
 	for (i = 0; i < size; i++) {
-		if (member->offset != hints_member->offset ||
+		if (member->type != hints_member->type ||
+		    member->offset != hints_member->offset ||
+		    /* should name also be validated? */
 		    strcmp(btf_name_by_offset(prog_btf, member->name_off),
-			   btf_name_by_offset(hints_btf, hints_member->name_off)))
+			   btf_name_by_offset(hints_btf, hints_type->name_off)))
 			return false;
 
 		member += 1;
@@ -201,7 +203,6 @@ int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
 		if (ice_hints_btf_matches(btf, type, supported_btfs[i],
 					  hints_type)) {
 	/* Set correct btf if found */
-			printk("correct btf found\n");
 			return 0;
 		}
 	}
@@ -209,7 +210,7 @@ int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
 	return -1;
 
 	/* Other approach, search for support field in btf of all supported
-	 * fields and build correct mapping to create correct hints layout in 
+	 * fields and build correct mapping to create correct hints layout in
 	 * irq
 	 */
 }
