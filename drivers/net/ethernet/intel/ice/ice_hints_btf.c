@@ -115,8 +115,7 @@ ice_xdp_register_btf(struct btf_info *info)
 	return res;
 }
 
-int
-ice_xdp_register_btfs(struct ice_netdev_priv *priv)
+int ice_xdp_register_btfs(struct ice_netdev_priv *priv)
 {
 	int btfs_amount = ARRAY_SIZE(ice_btfs_info);
 	int err = 0;
@@ -137,8 +136,7 @@ ice_xdp_register_btfs(struct ice_netdev_priv *priv)
         return err;
 }
 
-void
-ice_xdp_unregister_btfs(struct ice_netdev_priv *priv)
+void ice_xdp_unregister_btfs(struct ice_netdev_priv *priv)
 {
 	int i;
 
@@ -148,4 +146,71 @@ ice_xdp_unregister_btfs(struct ice_netdev_priv *priv)
 	}
 
 	kfree(priv->xdp.btfs);
+}
+
+static bool
+ice_hints_btf_matches(struct btf *prog_btf, struct btf_type *type,
+		      struct btf *hints_btf, struct btf_type *hints_type)
+{
+	struct btf_member *member, hints_member;
+	int size = btf_type_vlen(type);
+	int i;
+
+	/* check if types are struct */
+
+	if (size != btf_type_vlen(hints_type))
+		return false;
+
+	member = btf_type_member(type);
+	hints_member = btf_type_member(hints_type);
+	for (i = 0; i < size; i++) {
+		if (member->type != hints_member->type ||
+		    member->offset != hints_member->offset ||
+		    /* should name also be validated? */
+		    strncmp(btf_name_by_offset(prog_btf, member->name_off),
+			    btf_name_by_offset(hints_btf, hints_type->name_off)))
+			return false;
+
+		member += 1;
+		hints_member += 1;
+	}
+
+	return true;
+}
+
+
+int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
+{
+	/* Search for name in btf */
+	int id = btf_id_by_name(btf, name);
+	struct btf_type *type;
+	int i;
+
+	if (id < 0)
+		return -1;
+
+	type = btf_type_by_id(btf, id);
+
+	/* Searching for all correct layout of structure */
+	for (i = 0; i < ARRAY_SIZE(ice_btfs_info); i++) {
+		int hints_id = btf_id_by_name(supported_btfs[i], name);
+		struct btf_type *hints_type;
+
+		if (hints_id < 0)
+			continue;
+
+		hints_type = btf_type_by_id(supported_btfs[i], hints_id);
+		if (ice_hints_btf_matches(btf, type, supported_btfs[i],
+					  hints_type)) {
+	/* Set correct btf if found */
+			return 0;
+		}
+	}
+
+	return -1;
+
+	/* Other approach, search for support field in btf of all supported
+	 * fields and build correct mapping to create correct hints layout in 
+	 * irq
+	 */
 }

@@ -701,6 +701,20 @@ static const char *__btf_name_by_offset(const struct btf *btf, u32 offset)
 	return name ?: "(invalid-name-offset)";
 }
 
+int btf_id_by_name(const struct btf *btf, char *name)
+{
+	int i;
+
+	for (i = 0; i < btf->nr_types; i++) {
+		struct btf_type *type = btf->types[i];
+
+		if (!strcmp(btf_name_by_offset(btf, type->name_off), name))
+			return i;
+	}
+
+	return -1;
+}
+
 const char *btf_name_by_offset(const struct btf *btf, u32 offset)
 {
 	return btf_str_by_offset(btf, offset);
