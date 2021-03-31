@@ -2593,10 +2593,8 @@ static int ice_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 		return ice_xsk_pool_setup(vsi, xdp->xsk.pool,
 					  xdp->xsk.queue_id);
         case XDP_QUERY_MD_BTF:
-                printk("xdp_query_md_btf\n");
                 return 0;
 	case XDP_SETUP_HINTS:
-		printk("xdp_setup_hints\n");
 		return ice_hints_setup(xdp->hints.btf, xdp->hints.name,
 				       np->xdp.btfs);
 	default:

@@ -149,10 +149,10 @@ void ice_xdp_unregister_btfs(struct ice_netdev_priv *priv)
 }
 
 static bool
-ice_hints_btf_matches(struct btf *prog_btf, struct btf_type *type,
-		      struct btf *hints_btf, struct btf_type *hints_type)
+ice_hints_btf_matches(struct btf *prog_btf, const struct btf_type *type,
+		      struct btf *hints_btf, const struct btf_type *hints_type)
 {
-	struct btf_member *member, hints_member;
+	struct btf_member *member, *hints_member;
 	int size = btf_type_vlen(type);
 	int i;
 
@@ -164,11 +164,9 @@ ice_hints_btf_matches(struct btf *prog_btf, struct btf_type *type,
 	member = btf_type_member(type);
 	hints_member = btf_type_member(hints_type);
 	for (i = 0; i < size; i++) {
-		if (member->type != hints_member->type ||
-		    member->offset != hints_member->offset ||
-		    /* should name also be validated? */
-		    strncmp(btf_name_by_offset(prog_btf, member->name_off),
-			    btf_name_by_offset(hints_btf, hints_type->name_off)))
+		if (member->offset != hints_member->offset ||
+		    strcmp(btf_name_by_offset(prog_btf, member->name_off),
+			   btf_name_by_offset(hints_btf, hints_member->name_off)))
 			return false;
 
 		member += 1;
@@ -183,7 +181,7 @@ int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
 {
 	/* Search for name in btf */
 	int id = btf_id_by_name(btf, name);
-	struct btf_type *type;
+	const struct btf_type *type;
 	int i;
 
 	if (id < 0)
@@ -194,7 +192,7 @@ int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
 	/* Searching for all correct layout of structure */
 	for (i = 0; i < ARRAY_SIZE(ice_btfs_info); i++) {
 		int hints_id = btf_id_by_name(supported_btfs[i], name);
-		struct btf_type *hints_type;
+		const struct btf_type *hints_type;
 
 		if (hints_id < 0)
 			continue;
@@ -203,6 +201,7 @@ int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
 		if (ice_hints_btf_matches(btf, type, supported_btfs[i],
 					  hints_type)) {
 	/* Set correct btf if found */
+			printk("correct btf found\n");
 			return 0;
 		}
 	}

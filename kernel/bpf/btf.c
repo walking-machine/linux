@@ -705,7 +705,7 @@ int btf_id_by_name(const struct btf *btf, char *name)
 {
 	int i;
 
-	for (i = 0; i < btf->nr_types; i++) {
+	for (i = 1; i <= btf->nr_types; i++) {
 		struct btf_type *type = btf->types[i];
 
 		if (!strcmp(btf_name_by_offset(btf, type->name_off), name))
@@ -714,11 +714,13 @@ int btf_id_by_name(const struct btf *btf, char *name)
 
 	return -1;
 }
+EXPORT_SYMBOL(btf_id_by_name);
 
 const char *btf_name_by_offset(const struct btf *btf, u32 offset)
 {
 	return btf_str_by_offset(btf, offset);
 }
+EXPORT_SYMBOL(btf_name_by_offset);
 
 const struct btf_type *btf_type_by_id(const struct btf *btf, u32 type_id)
 {
@@ -730,6 +732,7 @@ const struct btf_type *btf_type_by_id(const struct btf *btf, u32 type_id)
 		return NULL;
 	return btf->types[type_id];
 }
+EXPORT_SYMBOL(btf_type_by_id);
 
 /*
  * Regular int is not a bit field and it must be either
