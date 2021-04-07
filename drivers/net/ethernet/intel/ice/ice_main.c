@@ -2595,8 +2595,11 @@ static int ice_xdp(struct net_device *dev, struct netdev_bpf *xdp)
         case XDP_QUERY_MD_BTF:
                 return 0;
 	case XDP_SETUP_HINTS:
-		return ice_hints_setup(xdp->hints.btf, xdp->hints.name,
-				       np->xdp.btfs);
+		vsi->hints = ice_hints_find(xdp->hints.btf, xdp->hints.name,
+					    np->xdp.btfs);
+		if (vsi->hints == -1)
+			return -EINVAL;
+		return 0;
 	default:
 		return -EINVAL;
 	}

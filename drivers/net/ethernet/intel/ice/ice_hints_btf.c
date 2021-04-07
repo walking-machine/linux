@@ -179,7 +179,7 @@ ice_hints_btf_matches(struct btf *prog_btf, const struct btf_type *type,
 }
 
 
-int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
+int ice_hints_find(struct btf *btf, char *name, struct btf **supported_btfs)
 {
 	/* Search for name in btf */
 	int id = btf_id_by_name(btf, name);
@@ -203,7 +203,7 @@ int ice_hints_setup(struct btf *btf, char *name, struct btf **supported_btfs)
 		if (ice_hints_btf_matches(btf, type, supported_btfs[i],
 					  hints_type)) {
 	/* Set correct btf if found */
-			return 0;
+			return i;
 		}
 	}
 

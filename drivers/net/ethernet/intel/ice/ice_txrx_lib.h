@@ -57,16 +57,33 @@ ice_process_skb_fields(struct ice_ring *rx_ring,
 void
 ice_receive_skb(struct ice_ring *rx_ring, struct sk_buff *skb, u16 vlan_tag);
 
-static inline void ice_xdp_set_meta(struct xdp_buff *xdp, union ice_32b_rx_flex_desc *rx_desc)
+struct ice_md_generic {
+	u32 hash;
+	u16 flow_id;
+};
+
+static inline void ice_xdp_set_meta(struct xdp_buff *xdp, union ice_32b_rx_flex_desc *rx_desc,
+				    int hints)
 {
-        struct ice_32b_rx_flex_desc_nic *md = xdp->data -
-		sizeof(struct ice_32b_rx_flex_desc_nic);
-        struct ice_32b_rx_flex_desc_nic *nic_mdid;
+        struct ice_32b_rx_flex_desc_nic *nic_mdid =
+		(struct ice_32b_rx_flex_desc_nic *)rx_desc;
 
-        xdp->data_meta = md;
 
-	nic_mdid = (struct ice_32b_rx_flex_desc_nic *)rx_desc;
-	*md = *nic_mdid;
+	if (hints == 0) {
+		struct ice_32b_rx_flex_desc_nic *md = xdp->data -
+			sizeof(struct ice_32b_rx_flex_desc_nic);
+
+		*md = *nic_mdid;
+		xdp->data_meta = md;
+	} else if (hints == 1) {
+		struct ice_md_generic *md = xdp->data -
+			sizeof(struct ice_md_generic);
+
+		md->hash = nic_mdid->rss_hash;
+		md->flow_id = nic_mdid->flow_id;
+
+		xdp->data_meta = md;
+	}
 }
 
 #endif /* !_ICE_TXRX_LIB_H_ */

@@ -342,6 +342,8 @@ struct ice_vsi {
 	 * corresponds to
 	 */
 	struct ice_agg_node *agg_node;
+
+	int hints;
 } ____cacheline_internodealigned_in_smp;
 
 /* struct that defines an interrupt vector */
