@@ -251,6 +251,18 @@ enum ice_vsi_state {
 	ICE_VSI_STATE_NBITS		/* must be last */
 };
 
+struct ice_hints_mapping_info {
+	u8 offset;
+	u8 mask;
+	u8 size;
+};
+
+struct ice_hints_mapping {
+	struct ice_hints_mapping_info *info;
+	u8 amount;
+	u8 size_in_bytes;
+};
+
 /* struct that defines a VSI, associated with a dev */
 struct ice_vsi {
 	struct net_device *netdev;
@@ -343,7 +355,8 @@ struct ice_vsi {
 	 */
 	struct ice_agg_node *agg_node;
 
-	int hints;
+	/* temporary */
+	struct ice_hints_mapping hints_mapping;
 } ____cacheline_internodealigned_in_smp;
 
 /* struct that defines an interrupt vector */
@@ -493,7 +506,7 @@ struct ice_netdev_priv {
 	struct ice_vsi *vsi;
 	struct {
                 u8 btf_enabled;
-                struct btf **btfs;
+                struct btf *btf;
         }xdp;
 };
 

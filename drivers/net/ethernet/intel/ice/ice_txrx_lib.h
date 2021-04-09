@@ -63,27 +63,21 @@ struct ice_md_generic {
 };
 
 static inline void ice_xdp_set_meta(struct xdp_buff *xdp, union ice_32b_rx_flex_desc *rx_desc,
-				    int hints)
+				    struct ice_hints_mapping *hints)
 {
         struct ice_32b_rx_flex_desc_nic *nic_mdid =
 		(struct ice_32b_rx_flex_desc_nic *)rx_desc;
+	u8 *md = xdp->data - hints->size_in_bytes;
+	int i, off = 0;
 
+	for (i = 0; i < hints->amount; i++) {
+		struct ice_hints_mapping_info *info = &hints->info[i];
 
-	if (hints == 0) {
-		struct ice_32b_rx_flex_desc_nic *md = xdp->data -
-			sizeof(struct ice_32b_rx_flex_desc_nic);
-
-		*md = *nic_mdid;
-		xdp->data_meta = md;
-	} else if (hints == 1) {
-		struct ice_md_generic *md = xdp->data -
-			sizeof(struct ice_md_generic);
-
-		md->hash = nic_mdid->rss_hash;
-		md->flow_id = nic_mdid->flow_id;
-
-		xdp->data_meta = md;
+		memcpy(md + off, (u8 *)nic_mdid + info->offset, info->size);
+		off += info->size;
 	}
+
+	xdp->data_meta = md;
 }
 
 #endif /* !_ICE_TXRX_LIB_H_ */

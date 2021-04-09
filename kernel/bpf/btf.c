@@ -506,6 +506,7 @@ const struct btf_type *btf_type_skip_modifiers(const struct btf *btf,
 
 	return t;
 }
+EXPORT_SYMBOL(btf_type_skip_modifiers);
 
 const struct btf_type *btf_type_resolve_ptr(const struct btf *btf,
 					    u32 id, u32 *res_id)

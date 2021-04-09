@@ -24,73 +24,54 @@
 #define BTF_MEMBER_ENC(name, type, bits_offset) \
         (name), (type), (bits_offset)
 
-#define ICE_MD_FLEX_NUM_MMBRS 16
-static const char names_str_flex[] = "\0xdp_md_desc\0rxdid\0mir_id_umb_cast\0ptype\0pkt_len\0hdr_len\0status_err0\0l2tag1\0rss_hash\0status_err1\0flex_flags2\0ts_low\0l2tag2_1st\0l2tag2_2nd\0flow_id\0vlan_id\0flow_id_ipv6\0";
-#define ICE_MD_GENERIC_NUM_MMBRS 2
-static const char names_str_generic[] = "\0xdp_md_gene\0hash\0flow_id\0";
+#define ICE_MD_SUPPORTED_HINTS_NUM_MMBRS 4
+static const char names_str_supported[] = "\0xdp_supported_md\0hash\0flow_id\0vlan_id\0timestamp\0";
 
-static const u32 ice_md_raw_types_flex[] = {
-        BTF_TYPE_INT_ENC(0, 0, 0, 32, 4),         /* type [1] */
-	BTF_TYPE_INT_ENC(0, 0, 0, 16, 2),         /* type [2] */
-	BTF_TYPE_INT_ENC(0, 0, 0, 8, 1),         /* type [3] */
-        BTF_STRUCT_ENC(1, ICE_MD_FLEX_NUM_MMBRS, 1 + 1 + 2 + 2 + 2 + 2 + 2 + 4 + 2 +
-		       1 + 1 + 2 + 2 + 4 + 2 + 2),
-                BTF_MEMBER_ENC(13, 3, 0),   /* u8 rxdid;    */
-                BTF_MEMBER_ENC(19, 3, 8),  /* u8 mir_id_umb_cast;       */
-		BTF_MEMBER_ENC(35, 2, 16),  /* u16 ptype;         */
-		BTF_MEMBER_ENC(41, 2, 32), /* u16 pkt_len; */
-		BTF_MEMBER_ENC(49, 2, 48), /* u16 hdr_len; */
-		BTF_MEMBER_ENC(57, 2, 64), /* u16 status_err0; */
-		BTF_MEMBER_ENC(69, 2, 80), /* u16 l2tag1; */
-		BTF_MEMBER_ENC(76, 1, 96), /* u32 rss_hash */
-		BTF_MEMBER_ENC(85, 2, 128), /* u16 status_err1; */
-		BTF_MEMBER_ENC(97, 3, 144), /* u8 flex_flags2; */
-		BTF_MEMBER_ENC(109, 3, 152), /* u8 ts_low */
-		BTF_MEMBER_ENC(116, 2, 160), /* u16 l2tag2_1st; */
-		BTF_MEMBER_ENC(127, 2, 176), /* u16 l2tag2_2nd; */
-		BTF_MEMBER_ENC(138, 1, 192), /* u32 flow_id; */
-		BTF_MEMBER_ENC(146, 2, 224), /* u16 vlan_id; */
-		BTF_MEMBER_ENC(154, 2, 240), /* u16 flow_id_ipv6; */
-};
-
-static const u32 ice_md_raw_types_generic[] = {
+static const u32 ice_supported_md_raw[] = {
 	BTF_TYPE_INT_ENC(0, 0, 0, 32, 4),
 	BTF_TYPE_INT_ENC(0, 0, 0, 16, 2),
-	BTF_STRUCT_ENC(1, ICE_MD_GENERIC_NUM_MMBRS, 4 + 4),
-		BTF_MEMBER_ENC(13, 1, 0), /* u32 hash */
-		BTF_MEMBER_ENC(18, 1, 32), /* u16 flow_id */
+	BTF_STRUCT_ENC(1, ICE_MD_SUPPORTED_HINTS_NUM_MMBRS, 4 + 4 + 2 + 4),
+		BTF_MEMBER_ENC(18, 1, 0), /* u32 hash */
+		BTF_MEMBER_ENC(23, 1, 32), /* u32 flow_id */
+		BTF_MEMBER_ENC(31, 2, 64), /* u16 vlan_id */
+		BTF_MEMBER_ENC(39, 1, 80), /* u32 timestamp */
 };
 
-struct btf_info {
-	int types_sz;
-	int names_sz;
-	const char *names;
-	const u32 *types;
-} ice_btfs_info[] = {
-	{
-		.types_sz = sizeof(ice_md_raw_types_flex),
-		.names_sz = sizeof(names_str_flex),
-		.names = names_str_flex,
-		.types = ice_md_raw_types_flex,
-	},
-	{
-		.types_sz = sizeof(ice_md_raw_types_generic),
-		.names_sz = sizeof(names_str_generic),
-		.names = names_str_generic,
-		.types = ice_md_raw_types_generic,
-	},
+/* here is a mapping bettwen supported hints and used flex descriptor */
+struct descriptor_mapping_info {
+	const char *name;
+	int offset;
+	int size;
+};
+
+struct descriptor_mapping_info mapping_info[] = {
+	[0] = { .name = "hash", .offset = 96, .size = 4},
+	[1] = { .name = "flow_id", .offset = 192, .size = 4},
+	[2] = { .name = "vlan_id", .offset = 224, .size = 2},
+	[3] = { .name = "timestamp", .offset = 224, .size = 4}, /* overlap in descriptor */
+};
+
+struct descriptor_mapping {
+	const struct descriptor_mapping_info *info;
+	int amount;
+} mapping = {
+	.info = mapping_info,
+	.amount = 4,
 };
 
 static struct btf *
-ice_xdp_register_btf(struct btf_info *info)
+ice_xdp_register_btf(void)
 {
+	int raw_size, str_size;
 	struct btf_header *hdr;
 	char *types, *names;
 	struct btf *res;
 	void *raw;
 	int size;
 
-	size = sizeof(*hdr) + info->types_sz + info->names_sz;
+	raw_size = sizeof(ice_supported_md_raw);
+	str_size = sizeof(names_str_supported);
+	size = sizeof(*hdr) + raw_size + str_size;
 	raw = kzalloc(size, GFP_KERNEL);
 	if (!raw)
 		return NULL;
@@ -100,14 +81,14 @@ ice_xdp_register_btf(struct btf_info *info)
         hdr->version  = BTF_VERSION;
         hdr->hdr_len  = sizeof(*hdr);
         hdr->type_off = 0;
-        hdr->type_len = info->types_sz;
-        hdr->str_off  = info->types_sz;
-        hdr->str_len  = info->names_sz;
+        hdr->type_len = raw_size;
+        hdr->str_off  = raw_size;
+        hdr->str_len  = str_size;
 
 	types = raw + sizeof(*hdr);
-	names = types + info->types_sz;
-	memcpy(types, info->types, info->types_sz);
-	memcpy(names, info->names, info->names_sz);
+	names = types + raw_size;
+	memcpy(types, ice_supported_md_raw, raw_size);
+	memcpy(names, names_str_supported, str_size);
 
 	res = btf_register(raw, size);
 
@@ -117,20 +98,12 @@ ice_xdp_register_btf(struct btf_info *info)
 
 int ice_xdp_register_btfs(struct ice_netdev_priv *priv)
 {
-	int btfs_amount = ARRAY_SIZE(ice_btfs_info);
 	int err = 0;
-	int i;
 
-	priv->xdp.btfs = kzalloc(btfs_amount * sizeof(struct btf *), GFP_KERNEL);
-	if (!priv->xdp.btfs)
-		return -ENOMEM;
-
-	for (i = 0; i < btfs_amount; i++) {
-		priv->xdp.btfs[i] = ice_xdp_register_btf(&ice_btfs_info[i]);
-		if (IS_ERR(priv->xdp.btfs[i])) {
-			err = PTR_ERR(priv->xdp.btfs[i]);
-			priv->xdp.btfs[i] = NULL;
-		}
+	priv->xdp.btf = ice_xdp_register_btf();
+	if (IS_ERR(priv->xdp.btf)) {
+		err = PTR_ERR(priv->xdp.btf);
+		priv->xdp.btf = NULL;
 	}
 
         return err;
@@ -138,79 +111,80 @@ int ice_xdp_register_btfs(struct ice_netdev_priv *priv)
 
 void ice_xdp_unregister_btfs(struct ice_netdev_priv *priv)
 {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(ice_btfs_info); i++) {
-		if (priv->xdp.btfs[i])
-			btf_unregister(priv->xdp.btfs[i]);
-	}
-
-	kfree(priv->xdp.btfs);
+	if (priv->xdp.btf)
+		btf_unregister(priv->xdp.btf);
 }
 
-static bool
-ice_hints_btf_matches(struct btf *prog_btf, const struct btf_type *type,
-		      struct btf *hints_btf, const struct btf_type *hints_type)
+static int
+ice_fill_mapping(struct btf *btf, const struct btf_member *member,
+		 struct btf *supported_btf, struct ice_hints_mapping *mapping)
 {
-	struct btf_member *member, *hints_member;
-	int size = btf_type_vlen(type);
+	int supported_id = btf_id_by_name(supported_btf, "xdp_supported_md");
+	const struct btf_type *supported_type;
+	const struct btf_type *program_type;
+	const struct btf_member *mem;
 	int i;
 
-	/* check if types are struct */
+	program_type = btf_type_skip_modifiers(btf, member->type, NULL);
 
-	if (size != btf_type_vlen(hints_type))
-		return false;
+	if (supported_id < 0)
+		return -1;
 
-	member = btf_type_member(type);
-	hints_member = btf_type_member(hints_type);
-	for (i = 0; i < size; i++) {
-		if (member->type != hints_member->type ||
-		    member->offset != hints_member->offset ||
-		    /* should name also be validated? */
-		    strcmp(btf_name_by_offset(prog_btf, member->name_off),
-			   btf_name_by_offset(hints_btf, hints_type->name_off)))
-			return false;
+	supported_type = btf_type_by_id(supported_btf, supported_id);
 
-		member += 1;
-		hints_member += 1;
+	for_each_member(i, supported_type, mem) {
+		struct ice_hints_mapping_info *info =
+			&mapping->info[mapping->amount];
+		const struct btf_type *driver_type;
+
+		if (strcmp(btf_name_by_offset(btf, member->name_off),
+			   btf_name_by_offset(supported_btf, mem->name_off)))
+			continue;
+
+		driver_type = btf_type_skip_modifiers(supported_btf, mem->type, NULL);
+
+		if (program_type->size != driver_type->size)
+			continue;
+
+		info->offset = mapping_info[i].offset;
+		info->size = mapping_info[i].size;
+		info->mask = 0xff;
+
+		mapping->amount += 1;
+		mapping->size_in_bytes += program_type->size;
+
+		return 0;
 	}
 
-	return true;
+	return -1;
 }
 
-
-int ice_hints_find(struct btf *btf, char *name, struct btf **supported_btfs)
+int ice_hints_find(struct btf *btf, char *name, struct btf *supported_btf,
+		   struct ice_hints_mapping *mapping)
 {
 	/* Search for name in btf */
+	const struct btf_member *hints_member;
 	int id = btf_id_by_name(btf, name);
 	const struct btf_type *type;
+	int size;
 	int i;
 
 	if (id < 0)
 		return -1;
 
 	type = btf_type_by_id(btf, id);
+	size = btf_type_vlen(type);
 
-	/* Searching for all correct layout of structure */
-	for (i = 0; i < ARRAY_SIZE(ice_btfs_info); i++) {
-		int hints_id = btf_id_by_name(supported_btfs[i], name);
-		const struct btf_type *hints_type;
+	mapping->info = kcalloc(size, sizeof(struct ice_hints_mapping_info),
+				GFP_KERNEL);
+	mapping->amount = 0;
+	mapping->size_in_bytes = 0;
 
-		if (hints_id < 0)
-			continue;
-
-		hints_type = btf_type_by_id(supported_btfs[i], hints_id);
-		if (ice_hints_btf_matches(btf, type, supported_btfs[i],
-					  hints_type)) {
-	/* Set correct btf if found */
-			return i;
-		}
+	for_each_member(i, type, hints_member) {
+		if (ice_fill_mapping(btf, hints_member, supported_btf,
+				     mapping))
+			return -1;
 	}
 
-	return -1;
-
-	/* Other approach, search for support field in btf of all supported
-	 * fields and build correct mapping to create correct hints layout in
-	 * irq
-	 */
+	return 0;
 }
