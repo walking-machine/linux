@@ -994,7 +994,7 @@ struct netdev_bpf {
 		/* XDP_SETUP_HINTS */
 		struct {
 			struct btf *btf;
-			char *name;
+			const char *name;
 		} hints;
 	};
 	struct netlink_ext_ack *extack;

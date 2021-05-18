@@ -155,12 +155,6 @@ enum libbpf_tristate {
 	TRI_MODULE = 2,
 };
 
-#define XDP_HINTS_BTF_NAME __xdp_hints_name_marker__
-#define XDP_USE_HINTS(name)		\
-	struct XDP_HINTS_BTF_NAME {	\
-		name hints;		\
-	};
-
 #define __kconfig __attribute__((section(".kconfig")))
 #define __ksym __attribute__((section(".ksyms")))
 

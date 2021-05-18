@@ -8,6 +8,17 @@
 #include <uapi/linux/btf.h>
 #include <uapi/linux/bpf.h>
 
+#define xstr(s) str(s)
+#define str(s) #s
+
+#define BTF_XDP_HINTS_NAME __xdp_hints_name_marker__
+#define BTF_XDP_HINTS_NAME_STR xstr(BTF_XDP_HINTS_NAME)
+#define BTF_XDP_USE_HINTS(name)		\
+	struct BTF_XDP_HINTS_NAME {	\
+		name hints;		\
+	};				\
+	struct BTF_XDP_HINTS_NAME __xdp_hints_name_mareker_variable__;
+
 #define BTF_TYPE_EMIT(type) ((void)(type *)0)
 #define BTF_TYPE_EMIT_ENUM(enum_val) ((void)enum_val)
 

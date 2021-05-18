@@ -9557,17 +9557,10 @@ static int check_btf_func(struct bpf_verifier_env *env,
 
 		for (j = 0; j < len; j++) {
 			const struct btf_type *arg_type;
-			const char *ctx_name =
-				btf_name_by_offset(btf, args[i].name_off);
 
 			arg_type = btf_type_by_id(btf, args[i].type);
 			if (!btf_type_is_ptr(arg_type))
 				continue;
-
-			arg_type = btf_type_by_id(btf, arg_type->type);
-			if (!strcmp(btf_name_by_offset(btf, arg_type->name_off),
-				    "xdp_md"))
-				env->ctx_name = ctx_name;
 		}
 
 		prev_offset = krecord[i].insn_off;
@@ -9597,51 +9590,26 @@ static void adjust_btf_func(struct bpf_verifier_env *env)
 		aux->func_info[i].insn_off = env->subprog_info[i].start;
 }
 
-static void
-check_btf_hints_line(struct bpf_verifier_env *env, const char *line)
+static const char *
+find_btf_hints_name(struct btf *btf)
 {
-	const char allowed_chars[] = {' ', '=', ')'};
-	const char hints_field[] = "->data_meta";
-	const char struct_pattern[] = "struct ";
-	char *hints_meta, *hints_name;
-	int hints_idx, i;
+	const struct btf_member *member;
+	const struct btf_type *type;
+	int id;
+	
+	if (!btf)
+		return NULL;
 
-	if (!env->ctx_name)
-		return;
+	id = btf_id_by_name(btf, BTF_XDP_HINTS_NAME_STR);
 
-	hints_meta = kzalloc(strlen(env->ctx_name) + strlen(hints_field),
-			     GFP_KERNEL);
-	if (!hints_meta)
-		return;
+	if (id < 0)
+		return NULL;
 
-	hints_meta = strcat(hints_meta, env->ctx_name);
-	hints_meta = strcat(hints_meta, hints_field);
+	type = btf_type_by_id(btf, id);
+	member = btf_type_member(type);
+	type = btf_type_by_id(btf, member->type);
 
-	if (!strstr(line, hints_meta))
-		goto err_free;
-
-	hints_name = strstr(line, struct_pattern);
-	if (!hints_name)
-		goto err_free;
-
-	hints_idx = (hints_name - line) + strlen(struct_pattern);
-
-	for (i = 0; i < ARRAY_SIZE(allowed_chars); i++) {
-		const char *hints_name_end = strchr(&line[hints_idx],
-						    allowed_chars[i]);
-		int name_size;
-
-		if (!hints_name_end)
-			continue;
-
-		name_size = hints_name_end - (hints_name + hints_idx) + 1;
-		env->hints_name = kzalloc(name_size, GFP_KERNEL);
-		strncpy(env->hints_name, &line[hints_idx], name_size);
-		break;
-	}
-
-err_free:
-	kfree(hints_meta);
+	return btf_name_by_offset(btf, type->name_off);
 }
 
 #define MIN_BPF_LINEINFO_SIZE	(offsetof(struct bpf_line_info, line_col) + \
@@ -9752,7 +9720,6 @@ static int check_btf_line(struct bpf_verifier_env *env,
 		}
 
 		line = btf_name_by_offset(btf, linfo[i].line_off);
-		check_btf_hints_line(env, line);
 
 		prev_offset = linfo[i].insn_off;
 		ulinfo += rec_size;
@@ -13357,7 +13324,7 @@ struct btf *bpf_get_btf_vmlinux(void)
 	return btf_vmlinux;
 }
 
-static void bpf_hints_ndo(int ifindex, char *hints_name, struct btf *btf)
+static void bpf_hints_ndo(int ifindex, const char *hints_name, struct btf *btf)
 {
 	struct net_device *netdev = dev_get_by_index(current->nsproxy->net_ns,
 						     ifindex);
@@ -13378,6 +13345,7 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr,
 	struct bpf_verifier_env *env;
 	struct bpf_verifier_log *log;
 	int i, len, ret = -EINVAL;
+	const char *hints_name;
 	bool is_priv;
 
 	/* no program is valid */
@@ -13580,11 +13548,11 @@ skip_full_check:
 
 	adjust_btf_func(env);
 
-	if (env->hints_name) {
+	hints_name = find_btf_hints_name(env->prog->aux->btf);
+	if (hints_name) {
 		printk("hints found\n");
-		bpf_hints_ndo(attr->prog_ifindex, env->hints_name,
+		bpf_hints_ndo(attr->prog_ifindex, hints_name,
 			      env->prog->aux->btf);
-		kfree(env->hints_name);
 	}
 
 err_release_maps:
