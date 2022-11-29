@@ -1527,6 +1527,7 @@ static int load_with_options(int argc, char **argv, bool first_prog_only)
 	unsigned int old_map_fds = 0;
 	const char *pinmaps = NULL;
 	bool auto_attach = false;
+	__u32 meta_ifindex = 0;
 	struct bpf_object *obj;
 	struct bpf_map *map;
 	const char *pinfile;
@@ -1623,17 +1624,27 @@ static int load_with_options(int argc, char **argv, bool first_prog_only)
 			map_replace[old_map_fds].fd = fd;
 			old_map_fds++;
 		} else if (is_prefix(*argv, "dev")) {
+			__u32 *cur_ifindex;
+
 			NEXT_ARG();
 
-			if (ifindex) {
-				p_err("offload device already specified");
+			if (ifindex || meta_ifindex) {
+				p_err("device already specified");
 				goto err_free_reuse_maps;
 			}
+
+			if (is_prefix(*argv, "xdpmeta")) {
+				cur_ifindex = &meta_ifindex;
+				NEXT_ARG();
+			} else {
+				cur_ifindex = &ifindex;
+			}
+
 			if (!REQ_ARGS(1))
 				goto err_free_reuse_maps;
 
-			ifindex = if_nametoindex(*argv);
-			if (!ifindex) {
+			*cur_ifindex = if_nametoindex(*argv);
+			if (!(*cur_ifindex)) {
 				p_err("unrecognized netdevice '%s': %s",
 				      *argv, strerror(errno));
 				goto err_free_reuse_maps;
@@ -1658,6 +1669,8 @@ static int load_with_options(int argc, char **argv, bool first_prog_only)
 
 	set_max_rlimit();
 
+	p_err("Loading with xdpmeta : %u \n", meta_ifindex);
+
 	if (verifier_logs)
 		/* log_level1 + log_level2 + stats, but not stable UAPI */
 		open_opts.kernel_log_level = 1 + 2 + 4;
@@ -1680,7 +1693,13 @@ static int load_with_options(int argc, char **argv, bool first_prog_only)
 				goto err_close_obj;
 		}
 
-		bpf_program__set_ifindex(pos, ifindex);
+		if (prog_type == BPF_PROG_TYPE_XDP && meta_ifindex) {
+			bpf_program__set_flags(pos, BPF_F_XDP_HAS_METADATA);
+			bpf_program__set_ifindex(pos, meta_ifindex);
+			p_err("Loading with xdpmeta\n");
+		} else {
+			bpf_program__set_ifindex(pos, ifindex);
+		}
 		bpf_program__set_type(pos, prog_type);
 		bpf_program__set_expected_attach_type(pos, expected_attach_type);
 	}
