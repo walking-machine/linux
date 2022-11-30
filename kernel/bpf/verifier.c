@@ -15176,6 +15176,12 @@ static int fixup_xdp_kfunc_call(struct bpf_verifier_env *env, u32 func_id)
 	struct bpf_prog_aux *aux = env->prog->aux;
 	void *resolved = NULL;
 
+	printk(KERN_ERR "func_id=%u\n", func_id);
+	printk(KERN_ERR "XDP_METADATA_KFUNC_RX_TIMESTAMP_SUPPORTED=%u\n", xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_TIMESTAMP_SUPPORTED));
+	printk(KERN_ERR "XDP_METADATA_KFUNC_RX_TIMESTAMP=%u\n", xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_TIMESTAMP));
+	printk(KERN_ERR "XDP_METADATA_KFUNC_RX_HASH_SUPPORTED=%u\n", xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED));
+	printk(KERN_ERR "XDP_METADATA_KFUNC_RX_HASH=%u\n", xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH));
+
 	if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_TIMESTAMP_SUPPORTED))
 		resolved = aux->xdp_netdev->netdev_ops->ndo_xdp_rx_timestamp_supported;
 	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_TIMESTAMP))
