@@ -739,6 +739,22 @@ XDP_METADATA_KFUNC_xxx
 BTF_SET8_END(xdp_metadata_kfunc_ids)
 EXPORT_SYMBOL(xdp_metadata_kfunc_ids);
 
+BTF_ID_LIST(xdp_metadata_kfunc_ids_unsorted)
+#define XDP_METADATA_KFUNC(name, str) BTF_ID(func, str)
+XDP_METADATA_KFUNC_xxx
+#undef XDP_METADATA_KFUNC
+
+#ifdef CONFIG_DEBUG_INFO_BTF
+u32 xdp_metadata_kfunc_id(int id)
+{
+	/* xdp_metadata_kfunc_ids is sorted and can't be used */
+	return xdp_metadata_kfunc_ids_unsorted[id];
+}
+#else
+u32 xdp_metadata_kfunc_id(int id) { return 0; }
+#endif
+EXPORT_SYMBOL_GPL(xdp_metadata_kfunc_id);
+
 /* Make sure userspace doesn't depend on our layout by using
  * different pseudo-generated magic value.
  */
