@@ -731,6 +731,18 @@ noinline const __u64 bpf_xdp_metadata_rx_timestamp(const struct xdp_md *ctx)
 	return 0;
 }
 
+noinline int bpf_xdp_metadata_rx_hash_supported(const struct xdp_md *ctx)
+{
+	/* payload is ignored, see default case in unroll_kfunc_call */
+	return false;
+}
+
+noinline const __u64 bpf_xdp_metadata_rx_hash(const struct xdp_md *ctx)
+{
+	/* payload is ignored, see default case in unroll_kfunc_call */
+	return 0;
+}
+
 #ifdef CONFIG_DEBUG_INFO_BTF
 BTF_SET8_START_GLOBAL(xdp_metadata_kfunc_ids)
 #define XDP_METADATA_KFUNC(name, str) BTF_ID_FLAGS(func, str, KF_RET_NULL | KF_UNROLL)
