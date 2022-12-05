@@ -2,6 +2,7 @@
 /* Copyright (c) 2019, Intel Corporation. */
 
 #include <linux/filter.h>
+#include <linux/bpf_patch.h>
 
 #include "ice_txrx_lib.h"
 #include "ice_eswitch.h"
@@ -365,5 +366,38 @@ void ice_finalize_xdp_rx(struct ice_tx_ring *xdp_ring, unsigned int xdp_res)
 		ice_xdp_ring_update_tail(xdp_ring);
 		if (static_branch_unlikely(&ice_xdp_locking_key))
 			spin_unlock(&xdp_ring->tx_lock);
+	}
+}
+
+static struct ice_xdp_buff *ice_rx_hash_present(struct ice_xdp_buff *ctx)
+{
+	ctx->r0 = ctx->rx_desc ?
+		  (u64)(ctx->rx_desc->wb.rxdid == ICE_RXDID_FLEX_NIC) : 0;
+	return ctx;
+}
+
+static struct ice_xdp_buff *ice_get_rx_hash(struct ice_xdp_buff *ctx)
+{
+	struct ice_32b_rx_flex_desc_nic *nic_mdid;
+
+	nic_mdid = (struct ice_32b_rx_flex_desc_nic *)ctx->rx_desc;
+	ctx->r0 = nic_mdid ? le32_to_cpu(nic_mdid->rss_hash) : 0;
+	return ctx;
+}
+
+void ice_unroll_kfunc(const struct bpf_prog *prog, u32 func_id,
+		      struct bpf_patch *patch)
+{
+	if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_EXPORT_TO_SKB)) {
+	} else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED)) {
+		xdp_kfunc_call_preserving_r1(patch,
+					     offsetof(struct ice_xdp_buff, r0),
+					     ice_rx_hash_present);
+	} else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH)) {
+		xdp_kfunc_call_preserving_r1(patch,
+					     offsetof(struct ice_xdp_buff, r0),
+					     ice_get_rx_hash);
+	} else {
+		bpf_patch_append(patch, BPF_MOV64_IMM(BPF_REG_0, 0));
 	}
 }

@@ -80,4 +80,11 @@ ice_process_skb_fields(struct ice_rx_ring *rx_ring,
 		       struct sk_buff *skb, u16 ptype);
 void
 ice_receive_skb(struct ice_rx_ring *rx_ring, struct sk_buff *skb, u16 vlan_tag);
+
+struct ice_xdp_buff {
+	struct xdp_buff xdp;
+	struct ice_rx_ring *rx_ring;
+	union ice_32b_rx_flex_desc *rx_desc;
+	u64 r0;
+};
 #endif /* !_ICE_TXRX_LIB_H_ */

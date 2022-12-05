@@ -1096,10 +1096,6 @@ ice_is_non_eop(struct ice_rx_ring *rx_ring, union ice_32b_rx_flex_desc *rx_desc)
 	return true;
 }
 
-struct ice_xdp_buff {
-	struct xdp_buff xdp;
-};
-
 /**
  * ice_clean_rx_irq - Clean completed descriptors from Rx ring - bounce buf
  * @rx_ring: Rx descriptor ring to transact packets on
@@ -1196,6 +1192,8 @@ int ice_clean_rx_irq(struct ice_rx_ring *rx_ring, int budget)
 		/* At larger PAGE_SIZE, frame_sz depend on len size */
 		ixbuf.xdp.frame_sz = ice_rx_frame_truesize(rx_ring, size);
 #endif
+		ixbuf.rx_ring = rx_ring;
+		ixbuf.rx_desc = rx_desc;
 
 		if (!xdp_prog)
 			goto construct_skb;
