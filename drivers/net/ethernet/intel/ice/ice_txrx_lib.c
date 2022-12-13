@@ -385,19 +385,69 @@ static struct ice_xdp_buff *ice_get_rx_hash(struct ice_xdp_buff *ctx)
 	return ctx;
 }
 
+static void ice_patch_append_rx_hash_supported(struct bpf_patch *patch)
+{
+	bpf_patch_append(patch,
+
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+
+		/* r4 = ((struct ice_xdp_buff *)r1)->rx_desc; */
+		BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_1,
+			    offsetof(struct ice_xdp_buff, rx_desc)),
+
+		/* if (r4 == NULL) return; */
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_4, 0, 3),
+
+		/* r3 = rx_desc->wb.rxdid; */
+		BPF_LDX_MEM(BPF_B, BPF_REG_3, BPF_REG_4, 0),	/* rxdid offset is '0' */
+
+		/* if (r3 != ICE_RXDID_FLEX_NIC) return with r0 = 0 */
+		BPF_JMP_IMM(BPF_JNE, BPF_REG_3, ICE_RXDID_FLEX_NIC, 1),
+
+		/* return true */
+		BPF_MOV64_IMM(BPF_REG_0, 1),
+		/* } */
+	);
+}
+
+static void ice_patch_append_rx_hash(struct bpf_patch *patch)
+{
+	bpf_patch_append(patch,
+
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+
+		/* r4 = ((struct ice_xdp_buff *)r1)->rx_desc; */
+		BPF_LDX_MEM(BPF_DW, BPF_REG_4, BPF_REG_1,
+			    offsetof(struct ice_xdp_buff, rx_desc)),
+
+		/* if (r4 == NULL) return; */
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_4, 0, 2),
+
+		/* r3 = rx_desc->rss_hash; */
+		BPF_LDX_MEM(BPF_W, BPF_REG_3, BPF_REG_4,
+			    offsetof(struct ice_32b_rx_flex_desc_nic, rss_hash)),
+
+		/* return r3 */
+		BPF_MOV64_REG(BPF_REG_0, BPF_REG_3),
+		/* } */
+	);
+}
+
 void ice_unroll_kfunc(const struct bpf_prog *prog, u32 func_id,
 		      struct bpf_patch *patch)
 {
-	if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_EXPORT_TO_SKB)) {
-	} else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED)) {
+	if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED))
 		xdp_kfunc_call_preserving_r1(patch,
 					     offsetof(struct ice_xdp_buff, r0),
 					     ice_rx_hash_present);
-	} else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH)) {
+	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH))
 		xdp_kfunc_call_preserving_r1(patch,
 					     offsetof(struct ice_xdp_buff, r0),
 					     ice_get_rx_hash);
-	} else {
+	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED_UNROLLED))
+		ice_patch_append_rx_hash_supported(patch);
+	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_UNROLLED))
+		ice_patch_append_rx_hash(patch);
+	else
 		bpf_patch_append(patch, BPF_MOV64_IMM(BPF_REG_0, 0));
-	}
 }
