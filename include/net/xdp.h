@@ -421,6 +421,10 @@ void xdp_attachment_setup(struct xdp_attachment_info *info,
 			   bpf_xdp_metadata_rx_hash_supported) \
 	XDP_METADATA_KFUNC(XDP_METADATA_KFUNC_RX_HASH, \
 			   bpf_xdp_metadata_rx_hash) \
+	XDP_METADATA_KFUNC(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED_R0, \
+			   bpf_xdp_metadata_rx_hash_supported_r0) \
+	XDP_METADATA_KFUNC(XDP_METADATA_KFUNC_RX_HASH_R0, \
+			   bpf_xdp_metadata_rx_hash_r0) \
 	XDP_METADATA_KFUNC(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED_UNROLLED, \
 			   bpf_xdp_metadata_rx_hash_supported_unrolled) \
 	XDP_METADATA_KFUNC(XDP_METADATA_KFUNC_RX_HASH_UNROLLED, \

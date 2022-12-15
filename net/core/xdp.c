@@ -743,6 +743,18 @@ noinline const __u64 bpf_xdp_metadata_rx_hash(const struct xdp_md *ctx)
 	return 0;
 }
 
+noinline int bpf_xdp_metadata_rx_hash_supported_r0(const struct xdp_md *ctx)
+{
+	/* payload is ignored, see default case in unroll_kfunc_call */
+	return false;
+}
+
+noinline const __u64 bpf_xdp_metadata_rx_hash_r0(const struct xdp_md *ctx)
+{
+	/* payload is ignored, see default case in unroll_kfunc_call */
+	return 0;
+}
+
 noinline int bpf_xdp_metadata_rx_hash_supported_unrolled(const struct xdp_md *ctx)
 {
 	/* payload is ignored, see default case in unroll_kfunc_call */
