@@ -369,20 +369,34 @@ void ice_finalize_xdp_rx(struct ice_tx_ring *xdp_ring, unsigned int xdp_res)
 	}
 }
 
-static struct ice_xdp_buff *ice_rx_hash_present(struct ice_xdp_buff *ctx)
+static struct ice_xdp_buff *ice_rx_hash_present_r0(struct ice_xdp_buff *ctx)
 {
 	ctx->r0 = ctx->rx_desc ?
 		  (u64)(ctx->rx_desc->wb.rxdid == ICE_RXDID_FLEX_NIC) : 0;
 	return ctx;
 }
 
-static struct ice_xdp_buff *ice_get_rx_hash(struct ice_xdp_buff *ctx)
+static struct ice_xdp_buff *ice_get_rx_hash_r0(struct ice_xdp_buff *ctx)
 {
 	struct ice_32b_rx_flex_desc_nic *nic_mdid;
 
 	nic_mdid = (struct ice_32b_rx_flex_desc_nic *)ctx->rx_desc;
 	ctx->r0 = nic_mdid ? le32_to_cpu(nic_mdid->rss_hash) : 0;
 	return ctx;
+}
+
+static u64 ice_get_rx_hash(struct ice_xdp_buff *ctx)
+{
+	struct ice_32b_rx_flex_desc_nic *nic_mdid;
+
+	nic_mdid = (struct ice_32b_rx_flex_desc_nic *)ctx->rx_desc;
+	return nic_mdid ? le32_to_cpu(nic_mdid->rss_hash) : 0;
+}
+
+static u64 ice_rx_hash_present(struct ice_xdp_buff *ctx)
+{
+	return ctx->rx_desc ?
+		(u64)(ctx->rx_desc->wb.rxdid == ICE_RXDID_FLEX_NIC) : 0;
 }
 
 static void ice_patch_append_rx_hash_supported(struct bpf_patch *patch)
@@ -436,18 +450,22 @@ static void ice_patch_append_rx_hash(struct bpf_patch *patch)
 void ice_unroll_kfunc(const struct bpf_prog *prog, u32 func_id,
 		      struct bpf_patch *patch)
 {
-	if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED))
+	if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED_R0))
 		xdp_kfunc_call_preserving_r1(patch,
 					     offsetof(struct ice_xdp_buff, r0),
-					     ice_rx_hash_present);
-	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH))
+					     ice_rx_hash_present_r0);
+	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_R0))
 		xdp_kfunc_call_preserving_r1(patch,
 					     offsetof(struct ice_xdp_buff, r0),
-					     ice_get_rx_hash);
+					     ice_get_rx_hash_r0);
 	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED_UNROLLED))
 		ice_patch_append_rx_hash_supported(patch);
 	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_UNROLLED))
 		ice_patch_append_rx_hash(patch);
+	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH_SUPPORTED))
+		bpf_patch_append(patch, BPF_EMIT_CALL(ice_rx_hash_present));
+	else if (func_id == xdp_metadata_kfunc_id(XDP_METADATA_KFUNC_RX_HASH))
+		bpf_patch_append(patch, BPF_EMIT_CALL(ice_get_rx_hash));
 	else
 		bpf_patch_append(patch, BPF_MOV64_IMM(BPF_REG_0, 0));
 }
