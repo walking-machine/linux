@@ -172,6 +172,8 @@ static int ice_qp_dis(struct ice_vsi *vsi, u16 q_idx)
 	q_vector = rx_ring->q_vector;
 
 	synchronize_net();
+	netif_trans_update(vsi->netdev);
+	netif_carrier_off(vsi->netdev);
 	netif_tx_stop_queue(netdev_get_tx_queue(vsi->netdev, q_idx));
 
 	ice_qvec_dis_irq(vsi, rx_ring, q_vector);
@@ -235,6 +237,7 @@ static int ice_qp_ena(struct ice_vsi *vsi, u16 q_idx)
 	ice_qvec_ena_irq(vsi, q_vector);
 
 	netif_tx_start_queue(netdev_get_tx_queue(vsi->netdev, q_idx));
+	netif_carrier_on(vsi->netdev);
 
 	return fail;
 }
