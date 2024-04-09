@@ -375,14 +375,6 @@ int ice_xsk_pool_setup(struct ice_vsi *vsi, struct xsk_buff_pool *pool, u16 qid)
 
 	if (if_running) {
 		struct ice_rx_ring *rx_ring = vsi->rx_rings[qid];
-		int timeout = 50;
-
-		while (test_and_set_bit(ICE_CFG_BUSY, vsi->state)) {
-			timeout--;
-			if (!timeout)
-				return -EBUSY;
-			usleep_range(1000, 2000);
-		}
 
 		ret = ice_qp_dis(vsi, qid);
 		if (ret) {
@@ -405,7 +397,6 @@ xsk_pool_if_up:
 			napi_schedule(&vsi->rx_rings[qid]->xdp_ring->q_vector->napi);
 		else if (ret)
 			netdev_err(vsi->netdev, "ice_qp_ena error = %d\n", ret);
-		clear_bit(ICE_CFG_BUSY, vsi->state);
 	}
 
 failure:
