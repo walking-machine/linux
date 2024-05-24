@@ -2994,7 +2994,7 @@ static int ice_max_xdp_frame_size(struct ice_vsi *vsi)
  * so it happens strictly before or after .ndo_bpf().
  * In case it has happened before, we do not have anything attached to rings
  */
-static bool ice_rebuild_pending(struct ice_vsi *vsi)
+bool ice_rebuild_pending(struct ice_vsi *vsi)
 {
 	return ice_is_reset_in_progress(vsi->back->state) &&
 	       !vsi->rx_rings[0]->desc;
