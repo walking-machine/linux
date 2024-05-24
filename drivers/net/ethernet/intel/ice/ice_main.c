@@ -3103,8 +3103,11 @@ static int ice_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 		return -EINVAL;
 	}
 
-	while (test_and_set_bit(ICE_CFG_BUSY, pf->state))
+	while (test_and_set_bit(ICE_CFG_BUSY, pf->state)) {
+		set_bit(ICE_RTNL_WAITS_FOR_RESET, pf->state);
 		usleep_range(1000, 2000);
+	}
+	clear_bit(ICE_RTNL_WAITS_FOR_RESET, pf->state);
 
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
