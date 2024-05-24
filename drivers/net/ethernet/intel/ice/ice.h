@@ -307,6 +307,7 @@ enum ice_pf_state {
 	ICE_PHY_INIT_COMPLETE,
 	ICE_FD_VF_FLUSH_CTX,		/* set at FD Rx IRQ or timeout */
 	ICE_AUX_ERR_PENDING,
+	ICE_RTNL_WAITS_FOR_RESET,
 	ICE_STATE_NBITS		/* must be last */
 };
 
