@@ -42,12 +42,6 @@ struct ixgbevf_tx_buffer {
 	u32 tx_flags;
 };
 
-struct ixgbevf_rx_buffer {
-	dma_addr_t dma;
-	struct page *page;
-	__u32 page_offset;
-};
-
 struct ixgbevf_stats {
 	u64 packets;
 	u64 bytes;
@@ -86,18 +80,21 @@ struct ixgbevf_ring {
 	struct ixgbevf_q_vector *q_vector;	/* backpointer to q_vector */
 	struct net_device *netdev;
 	struct bpf_prog *xdp_prog;
-	struct device *dev;
+	union {
+		struct page_pool *pp;	/* Rx ring */
+		struct device *dev;	/* Tx ring */
+	};
 	void *desc;			/* descriptor ring memory */
 	dma_addr_t dma;			/* phys. address of descriptor ring */
 	unsigned int size;		/* length in bytes */
+	u32 truesize;			/* Rx buffer full size */
 	u16 count;			/* amount of descriptors */
 	u16 next_to_use;
 	u16 next_to_clean;
-	u16 next_to_alloc;
 
 	union {
 		struct ixgbevf_tx_buffer *tx_buffer_info;
-		struct ixgbevf_rx_buffer *rx_buffer_info;
+		struct libeth_fqe *rx_fqes;
 	};
 	unsigned long state;
 	struct ixgbevf_stats stats;
@@ -116,6 +113,7 @@ struct ixgbevf_ring {
 	 */
 	u16 reg_idx;
 	int queue_index; /* needed for multiqueue queue management */
+	u32 rx_buf_len;
 } ____cacheline_internodealigned_in_smp;
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
