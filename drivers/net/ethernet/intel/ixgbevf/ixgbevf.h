@@ -42,12 +42,6 @@ struct ixgbevf_tx_buffer {
 	u32 tx_flags;
 };
 
-struct ixgbevf_rx_buffer {
-	dma_addr_t dma;
-	struct page *page;
-	__u32 page_offset;
-};
-
 struct ixgbevf_stats {
 	u64 packets;
 	u64 bytes;
@@ -60,9 +54,7 @@ struct ixgbevf_tx_queue_stats {
 };
 
 struct ixgbevf_rx_queue_stats {
-	u64 alloc_rx_page_failed;
-	u64 alloc_rx_buff_failed;
-	u64 alloc_rx_page;
+	u64 build_skb_failed;
 	u64 csum_err;
 };
 
@@ -84,19 +76,21 @@ struct ixgbevf_ring {
 	struct ixgbevf_ring *next;
 	struct ixgbevf_q_vector *q_vector;	/* backpointer to q_vector */
 	struct net_device *netdev;
-	struct bpf_prog *xdp_prog;
+	struct bpf_prog __rcu *xdp_prog;
 	struct device *dev;
+	struct page_pool *pp;		/* Regular Rx ring */
 	void *desc;			/* descriptor ring memory */
 	dma_addr_t dma;			/* phys. address of descriptor ring */
 	unsigned int size;		/* length in bytes */
+	u32 truesize;			/* Rx buffer full size */
 	u16 count;			/* amount of descriptors */
 	u16 next_to_use;
 	u16 next_to_clean;
-	u16 next_to_alloc;
+	u32 rx_buf_len;
 
 	union {
+		struct libeth_fqe *rx_fqes;
 		struct ixgbevf_tx_buffer *tx_buffer_info;
-		struct ixgbevf_rx_buffer *rx_buffer_info;
 	};
 	unsigned long state;
 	struct ixgbevf_stats stats;
@@ -105,9 +99,9 @@ struct ixgbevf_ring {
 		struct ixgbevf_tx_queue_stats tx_stats;
 		struct ixgbevf_rx_queue_stats rx_stats;
 	};
+	u8 __iomem *tail;
 	struct xdp_rxq_info xdp_rxq;
 	u64 hw_csum_rx_error;
-	u8 __iomem *tail;
 	struct sk_buff *skb;
 
 	/* holds the special value that gets the hardware register offset
@@ -144,7 +138,8 @@ struct ixgbevf_ring {
 
 #define MAXIMUM_ETHERNET_VLAN_SIZE (VLAN_ETH_FRAME_LEN + ETH_FCS_LEN)
 
-#define IXGBEVF_SKB_PAD		(NET_SKB_PAD + NET_IP_ALIGN)
+#define IXGBEVF_RX_PAGE_LEN(hr)		(ALIGN_DOWN(LIBETH_RX_PAGE_LEN(hr), \
+					 IXGBE_SRRCTL_BSIZEPKT_STEP))
 
 #define IXGBE_TX_FLAGS_CSUM		BIT(0)
 #define IXGBE_TX_FLAGS_VLAN		BIT(1)
@@ -280,9 +275,7 @@ struct ixgbevf_adapter {
 	struct ixgbevf_ring *rx_ring[MAX_TX_QUEUES]; /* One per active queue */
 	u64 hw_csum_rx_error;
 	int num_msix_vectors;
-	u64 alloc_rx_page_failed;
-	u64 alloc_rx_buff_failed;
-	u64 alloc_rx_page;
+	u64 build_skb_failed;
 	u64 rx_ipsec;
 
 	struct msix_entry *msix_entries;
