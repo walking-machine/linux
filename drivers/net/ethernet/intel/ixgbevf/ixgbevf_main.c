@@ -1564,6 +1564,11 @@ static void ixgbevf_setup_vfmrqc(struct ixgbevf_adapter *adapter)
 	IXGBE_WRITE_REG(hw, IXGBE_VFMRQC, vfmrqc);
 }
 
+static bool ixgbevf_rlpml_supported(const struct ixgbevf_adapter *adapter)
+{
+	return adapter->hw.mac.type != ixgbe_mac_82599_vf;
+}
+
 static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
 				      struct ixgbevf_ring *ring)
 {
@@ -1607,8 +1612,7 @@ static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
 
 	ixgbevf_configure_srrctl(adapter, ring, reg_idx);
 
-	/* RXDCTL.RLPML does not work on 82599 */
-	if (adapter->hw.mac.type != ixgbe_mac_82599_vf) {
+	if (ixgbevf_rlpml_supported(adapter)) {
 		rxdctl &= ~IXGBE_RXDCTL_RLPMLMASK;
 		rxdctl |= (ring->rx_buf_len & IXGBE_RXDCTL_RLPMLMASK) |
 			  IXGBE_RXDCTL_RLPML_EN;
@@ -4267,7 +4271,7 @@ static int ixgbevf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 				  (ETH_HLEN + ETH_FCS_LEN);
 		break;
 	default:
-		if (adapter->hw.mac.type != ixgbe_mac_82599_vf)
+		if (ixgbevf_rlpml_supported(adapter))
 			netdev->max_mtu = IXGBE_MAX_JUMBO_FRAME_SIZE -
 					  (ETH_HLEN + ETH_FCS_LEN);
 		else
