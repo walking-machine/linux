@@ -1429,6 +1429,12 @@ static void ixgbevf_configure_tx(struct ixgbevf_adapter *adapter)
 
 #define IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT	2
 
+static bool ixgbevf_rlpml_supported(const struct ixgbevf_adapter *adapter)
+{
+	//return adapter->hw.mac.type != ixgbe_mac_82599_vf;
+	return false;
+}
+
 static void ixgbevf_configure_srrctl(struct ixgbevf_adapter *adapter,
 				     struct ixgbevf_ring *ring, int index)
 {
@@ -1438,7 +1444,9 @@ static void ixgbevf_configure_srrctl(struct ixgbevf_adapter *adapter,
 	srrctl = IXGBE_SRRCTL_DROP_EN;
 
 	srrctl |= IXGBEVF_RX_HDR_SIZE << IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT;
-	srrctl |= DIV_ROUND_UP(ring->rx_buf_len, IXGBE_SRRCTL_BSIZEPKT_STEP);
+	srrctl |= ixgbevf_rlpml_supported(adapter) ?
+		  DIV_ROUND_UP(ring->rx_buf_len, IXGBE_SRRCTL_BSIZEPKT_STEP) :
+		  ring->rx_buf_len;
 	srrctl |= IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
 
 	IXGBE_WRITE_REG(hw, IXGBE_VFSRRCTL(index), srrctl);
@@ -1562,11 +1570,6 @@ static void ixgbevf_setup_vfmrqc(struct ixgbevf_adapter *adapter)
 	vfmrqc |= IXGBE_VFMRQC_RSSEN;
 
 	IXGBE_WRITE_REG(hw, IXGBE_VFMRQC, vfmrqc);
-}
-
-static bool ixgbevf_rlpml_supported(const struct ixgbevf_adapter *adapter)
-{
-	return adapter->hw.mac.type != ixgbe_mac_82599_vf;
 }
 
 static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
