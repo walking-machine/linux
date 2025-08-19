@@ -1615,7 +1615,8 @@ static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
 
 	ixgbevf_configure_srrctl(adapter, ring, reg_idx);
 
-	if (ixgbevf_rlpml_supported(adapter)) {
+	if (ixgbevf_rlpml_supported(adapter) &&
+	    !IS_ALIGNED(ring->rx_buf_len, IXGBE_SRRCTL_BSIZEPKT_STEP)) {
 		rxdctl &= ~IXGBE_RXDCTL_RLPMLMASK;
 		rxdctl |= (ring->rx_buf_len & IXGBE_RXDCTL_RLPMLMASK) |
 			  IXGBE_RXDCTL_RLPML_EN;
@@ -3101,15 +3102,36 @@ err_setup_tx:
 int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 			       struct ixgbevf_ring *rx_ring)
 {
-	struct libeth_fq fq = {
+	size_t pkt_data_size = READ_ONCE(adapter->netdev->mtu) +
+			       LIBETH_RX_LL_LEN;
+	bool align = !ixgbevf_rlpml_supported(adapter);
+	struct page_pool_params pp;
+	struct libeth_fq fq;
+	int ret;
+
+cfg:
+	fq = (struct libeth_fq) {
 		.count		= rx_ring->count,
 		.nid		= NUMA_NO_NODE,
 		.type		= LIBETH_FQE_MTU,
 		.xdp		= !!rx_ring->xdp_prog,
+		.stride		= align ? IXGBE_SRRCTL_BSIZEPKT_STEP : 0,
 	};
-	int ret;
 
-	ret = libeth_rx_fq_create(&fq, &rx_ring->q_vector->napi);
+	ret = libeth_rx_fq_cfg(&fq, &rx_ring->q_vector->napi, &pp);
+	if (ret)
+		return ret;
+
+	/* Packet is too big, RLPML packet filter cannot be used
+	 * to limit the data buffer size, so fall back on only using
+	 * 1K-aligned SRRCTL.BSIZEPKT
+	 */
+	if (!align && fq.buf_len < pkt_data_size) {
+		align = true;
+		goto cfg;
+	}
+
+	ret = libeth_rx_fq_create_from_params(&fq, &pp);
 	if (ret)
 		return ret;
 
