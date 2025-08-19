@@ -18,13 +18,14 @@
  * MTU the @dev has, HW required alignment, minimum and maximum allowed values,
  * and system's page size.
  */
-static u32 libeth_rx_hw_len_mtu(const struct page_pool_params *pp, u32 max_len)
+static u32 libeth_rx_hw_len_mtu(const struct page_pool_params *pp, u32 max_len,
+				u32 len_stride)
 {
 	u32 len;
 
 	len = READ_ONCE(pp->netdev->mtu) + LIBETH_RX_LL_LEN;
-	len = ALIGN(len, LIBETH_RX_BUF_STRIDE);
-	len = min3(len, ALIGN_DOWN(max_len ? : U32_MAX, LIBETH_RX_BUF_STRIDE),
+	len = ALIGN(len, len_stride);
+	len = min3(len, ALIGN_DOWN(max_len ? : U32_MAX, len_stride),
 		   pp->max_len);
 
 	return len;
@@ -41,17 +42,17 @@ static u32 libeth_rx_hw_len_mtu(const struct page_pool_params *pp, u32 max_len)
  * queues to fragment pages more efficiently.
  */
 static u32 libeth_rx_hw_len_truesize(const struct page_pool_params *pp,
-				     u32 max_len, u32 truesize)
+				     u32 max_len, u32 truesize, u32 len_stride)
 {
 	u32 min, len;
 
-	min = SKB_HEAD_ALIGN(pp->offset + LIBETH_RX_BUF_STRIDE);
+	min = SKB_HEAD_ALIGN(pp->offset + len_stride);
 	truesize = clamp(roundup_pow_of_two(truesize), roundup_pow_of_two(min),
 			 PAGE_SIZE << LIBETH_RX_PAGE_ORDER);
 
 	len = SKB_WITH_OVERHEAD(truesize - pp->offset);
-	len = ALIGN_DOWN(len, LIBETH_RX_BUF_STRIDE) ? : LIBETH_RX_BUF_STRIDE;
-	len = min3(len, ALIGN_DOWN(max_len ? : U32_MAX, LIBETH_RX_BUF_STRIDE),
+	len = ALIGN_DOWN(len, len_stride) ? : len_stride;
+	len = min3(len, ALIGN_DOWN(max_len ? : U32_MAX, len_stride),
 		   pp->max_len);
 
 	return len;
@@ -74,19 +75,20 @@ static bool libeth_rx_page_pool_params(struct libeth_fq *fq,
 {
 	pp->offset = fq->xdp ? LIBETH_XDP_HEADROOM : LIBETH_SKB_HEADROOM;
 	/* HW-writeable / syncable length per one page */
-	pp->max_len = LIBETH_RX_PAGE_LEN(pp->offset);
+	pp->max_len = LIBETH_RX_PAGE_LEN(pp->offset, fq->stride);
 
 	/* HW-writeable length per buffer */
 	switch (fq->type) {
 	case LIBETH_FQE_MTU:
-		fq->buf_len = libeth_rx_hw_len_mtu(pp, fq->buf_len);
+		fq->buf_len = libeth_rx_hw_len_mtu(pp, fq->buf_len, fq->stride);
 		break;
 	case LIBETH_FQE_SHORT:
 		fq->buf_len = libeth_rx_hw_len_truesize(pp, fq->buf_len,
-							fq->truesize);
+							fq->truesize,
+							fq->stride);
 		break;
 	case LIBETH_FQE_HDR:
-		fq->buf_len = ALIGN(LIBETH_MAX_HEAD, LIBETH_RX_BUF_STRIDE);
+		fq->buf_len = ALIGN(LIBETH_MAX_HEAD, fq->stride);
 		break;
 	default:
 		return false;
@@ -136,22 +138,16 @@ static bool libeth_rx_page_pool_params_zc(struct libeth_fq *fq,
 	max = min(rounddown_pow_of_two(fq->buf_len ? : U32_MAX),
 		  pp->max_len);
 
-	fq->buf_len = clamp(mtu, LIBETH_RX_BUF_STRIDE, max);
+	fq->buf_len = clamp(mtu, fq->stride, max);
 	fq->truesize = fq->buf_len;
 
 	return true;
 }
 
-/**
- * libeth_rx_fq_create - create a PP with the default libeth settings
- * @fq: buffer queue struct to fill
- * @napi: &napi_struct covering this PP (no usage outside its poll loops)
- *
- * Return: %0 on success, -%errno on failure.
- */
-int libeth_rx_fq_create(struct libeth_fq *fq, struct napi_struct *napi)
+int libeth_rx_fq_cfg(struct libeth_fq *fq, struct napi_struct *napi,
+		     struct page_pool_params *pp)
 {
-	struct page_pool_params pp = {
+	*pp = (struct page_pool_params) {
 		.flags		= PP_FLAG_DMA_MAP | PP_FLAG_DMA_SYNC_DEV,
 		.order		= LIBETH_RX_PAGE_ORDER,
 		.pool_size	= fq->count,
@@ -160,20 +156,24 @@ int libeth_rx_fq_create(struct libeth_fq *fq, struct napi_struct *napi)
 		.netdev		= napi->dev,
 		.napi		= napi,
 	};
+
+	pp->dma_dir = fq->xdp ? DMA_BIDIRECTIONAL : DMA_FROM_DEVICE;
+	fq->stride = fq->stride ? : LIBETH_RX_BUF_STRIDE;
+
+	if (fq->hsplit)
+		return libeth_rx_page_pool_params_zc(fq, pp) ? 0 : -EINVAL;
+
+	return libeth_rx_page_pool_params(fq, pp) ? 0 : -EINVAL;
+}
+
+int libeth_rx_fq_create_from_params(struct libeth_fq *fq,
+				    const struct page_pool_params *pp)
+{
 	struct libeth_fqe *fqes;
 	struct page_pool *pool;
 	int ret;
 
-	pp.dma_dir = fq->xdp ? DMA_BIDIRECTIONAL : DMA_FROM_DEVICE;
-
-	if (!fq->hsplit)
-		ret = libeth_rx_page_pool_params(fq, &pp);
-	else
-		ret = libeth_rx_page_pool_params_zc(fq, &pp);
-	if (!ret)
-		return -EINVAL;
-
-	pool = page_pool_create(&pp);
+	pool = page_pool_create(pp);
 	if (IS_ERR(pool))
 		return PTR_ERR(pool);
 
@@ -198,6 +198,25 @@ err_buf:
 	page_pool_destroy(pool);
 
 	return ret;
+}
+
+/**
+ * libeth_rx_fq_create - create a PP with the default libeth settings
+ * @fq: buffer queue struct to fill
+ * @napi: &napi_struct covering this PP (no usage outside its poll loops)
+ *
+ * Return: %0 on success, -%errno on failure.
+ */
+int libeth_rx_fq_create(struct libeth_fq *fq, struct napi_struct *napi)
+{
+	struct page_pool_params pp;
+	int ret;
+
+	ret = libeth_rx_fq_cfg(fq, napi, &pp);
+	if (ret)
+		return ret;
+
+	return libeth_rx_fq_create_from_params(fq, &pp);
 }
 EXPORT_SYMBOL_GPL(libeth_rx_fq_create);
 

@@ -27,9 +27,8 @@
 /* Pick a sane buffer stride and align to a cacheline boundary */
 #define LIBETH_RX_BUF_STRIDE	SKB_DATA_ALIGN(128)
 /* HW-writeable space in one buffer: truesize - headroom/tailroom, aligned */
-#define LIBETH_RX_PAGE_LEN(hr)						  \
-	ALIGN_DOWN(SKB_MAX_ORDER(hr, LIBETH_RX_PAGE_ORDER),		  \
-		   LIBETH_RX_BUF_STRIDE)
+#define LIBETH_RX_PAGE_LEN(hr, stride)					\
+	ALIGN_DOWN(SKB_MAX_ORDER(hr, LIBETH_RX_PAGE_ORDER), stride)
 
 /**
  * struct libeth_fqe - structure representing an Rx buffer (fill queue element)
@@ -71,6 +70,7 @@ enum libeth_fqe_type {
  * @xdp: flag indicating whether XDP is enabled
  * @buf_len: HW-writeable length per each buffer
  * @nid: ID of the closest NUMA node with memory
+ * @stride: step of Rx data buffer size, 0 if default
  */
 struct libeth_fq {
 	struct_group_tagged(libeth_fq_fp, fp,
@@ -88,9 +88,14 @@ struct libeth_fq {
 
 	u32			buf_len;
 	int			nid;
+	u32			stride;
 };
 
 int libeth_rx_fq_create(struct libeth_fq *fq, struct napi_struct *napi);
+int libeth_rx_fq_cfg(struct libeth_fq *fq, struct napi_struct *napi,
+		     struct page_pool_params *pp);
+int libeth_rx_fq_create_from_params(struct libeth_fq *fq,
+				    const struct page_pool_params *pp);
 void libeth_rx_fq_destroy(struct libeth_fq *fq);
 
 /**
