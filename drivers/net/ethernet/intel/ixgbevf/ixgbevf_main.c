@@ -3099,6 +3099,9 @@ int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 		.nid		= NUMA_NO_NODE,
 		.type		= LIBETH_FQE_MTU,
 		.xdp		= !!rx_ring->xdp_prog,
+		.buf_len	= IXGBEVF_RX_PAGE_LEN(rx_ring->xdp_prog ?
+						      LIBETH_XDP_HEADROOM :
+						      LIBETH_SKB_HEADROOM),
 	};
 	int ret;
 
