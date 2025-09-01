@@ -807,11 +807,11 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 	struct ixgbevf_adapter *adapter = q_vector->adapter;
 	u16 cleaned_count = ixgbevf_desc_unused(rx_ring);
 	struct sk_buff *skb = rx_ring->skb;
-	struct libeth_xdp_buff xdp = {};
+	LIBETH_XDP_ONSTACK_BUFF(xdp);
 	bool xdp_xmit = false;
 	int xdp_res = 0;
 
-	xdp_init_buff(&xdp.base, rx_ring->truesize, &rx_ring->xdp_rxq);
+	xdp->base.rxq = &rx_ring->xdp_rxq;
 
 	while (likely(total_rx_packets < budget)) {
 		union ixgbe_adv_rx_desc *rx_desc;
@@ -840,9 +840,9 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 
 		/* retrieve a buffer from the ring */
 		if (!skb) {
-			libeth_xdp_prepare_buff(&xdp, rx_buffer, size);
-			prefetch(xdp.data);
-			xdp_res = ixgbevf_run_xdp(adapter, rx_ring, &xdp);
+			libeth_xdp_prepare_buff(xdp, rx_buffer, size);
+			prefetch(xdp->data);
+			xdp_res = ixgbevf_run_xdp(adapter, rx_ring, xdp);
 		}
 
 		if (xdp_res) {
@@ -854,7 +854,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		} else if (skb) {
 			ixgbevf_add_rx_frag(rx_buffer, skb, size);
 		} else {
-			skb = xdp_build_skb_from_buff(&xdp.base);
+			skb = xdp_build_skb_from_buff(&xdp->base);
 		}
 
 		/* exit if we failed to retrieve a buffer */
