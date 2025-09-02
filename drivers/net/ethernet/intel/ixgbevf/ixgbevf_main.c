@@ -1438,7 +1438,7 @@ static void ixgbevf_configure_srrctl(struct ixgbevf_adapter *adapter,
 	srrctl = IXGBE_SRRCTL_DROP_EN;
 
 	srrctl |= IXGBEVF_RX_HDR_SIZE << IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT;
-	srrctl |= DIV_ROUND_UP(ring->rx_buf_len, IXGBE_SRRCTL_BSIZEPKT_STEP);
+	srrctl |= ring->rx_buf_len / IXGBE_SRRCTL_BSIZEPKT_STEP;
 	srrctl |= IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
 
 	IXGBE_WRITE_REG(hw, IXGBE_VFSRRCTL(index), srrctl);
