@@ -11,6 +11,7 @@
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/u64_stats_sync.h>
+#include <net/libeth/types.h>
 #include <net/xdp.h>
 
 #include "vf.h"
@@ -101,8 +102,8 @@ struct ixgbevf_ring {
 	};
 	u8 __iomem *tail;
 	struct xdp_rxq_info xdp_rxq;
+	struct libeth_xdp_buff_stash xdp_stash;
 	u64 hw_csum_rx_error;
-	struct sk_buff *skb;
 
 	/* holds the special value that gets the hardware register offset
 	 * associated with this ring, which is different for DCB and RSS modes
@@ -130,9 +131,8 @@ struct ixgbevf_ring {
 #define IXGBEVF_MAX_RXD		4096
 #define IXGBEVF_MIN_RXD		64
 
-/* Supported Rx Buffer Sizes */
+/* Fixed Rx Buffer Sizes */
 #define IXGBEVF_RXBUFFER_256	256
-#define IXGBEVF_RXBUFFER_3072	3072
 
 #define IXGBEVF_RX_HDR_SIZE	IXGBEVF_RXBUFFER_256
 
