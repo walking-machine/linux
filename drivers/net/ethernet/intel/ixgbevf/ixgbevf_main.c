@@ -597,6 +597,7 @@ static void ixgbevf_alloc_rx_buffers(struct ixgbevf_ring *rx_ring,
 		cleaned_count--;
 	} while (likely(cleaned_count));
 
+	rx_ring->rx_stats.alloc_rx_page += cleaned_count;
 	if (likely(rx_ring->next_to_use != ntu)) {
 		/* record the next descriptor to use */
 		rx_ring->next_to_use = ntu;
@@ -1579,9 +1580,11 @@ static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
 
 	/* RXDCTL.RLPML does not work on 82599 */
 	if (adapter->hw.mac.type != ixgbe_mac_82599_vf) {
-		rxdctl &= ~IXGBE_RXDCTL_RLPMLMASK;
-		rxdctl |= (ring->rx_buf_len & IXGBE_RXDCTL_RLPMLMASK) |
-			  IXGBE_RXDCTL_RLPML_EN;
+		u32 pkt_len = READ_ONCE(adapter->netdev->mtu) + LIBETH_RX_LL_LEN;
+
+		rxdctl &= ~(IXGBE_RXDCTL_RLPMLMASK | IXGBE_RXDCTL_RLPML_EN);
+		if (pkt_len <= IXGBE_RXDCTL_RLPMLMASK)
+			rxdctl |= pkt_len | IXGBE_RXDCTL_RLPML_EN;
 	}
 
 	rxdctl |= IXGBE_RXDCTL_ENABLE | IXGBE_RXDCTL_VME;
