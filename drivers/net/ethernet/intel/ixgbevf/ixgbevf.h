@@ -82,11 +82,10 @@ struct ixgbevf_ring {
 	struct net_device *netdev;
 	struct bpf_prog *xdp_prog;
 	union {
-		struct page_pool *pp;	/* Rx ring */
+		struct page_pool *pp;	/* Rx and XDP rings */
 		struct device *dev;	/* Tx ring */
 	};
 	void *desc;			/* descriptor ring memory */
-	dma_addr_t dma;			/* phys. address of descriptor ring */
 	union {
 		u32 truesize;		/* Rx buffer full size */
 		u32 pending;		/* Sent-not-completed descriptors */
@@ -94,7 +93,6 @@ struct ixgbevf_ring {
 	u16 count;			/* amount of descriptors */
 	u16 next_to_clean;
 	u32 next_to_use;
-
 
 	union {
 		struct ixgbevf_tx_buffer *tx_buffer_info;
@@ -120,6 +118,7 @@ struct ixgbevf_ring {
 	u32 rx_buf_len;
 	struct libeth_xdp_buff_stash xdp_stash;
 	unsigned int dma_size;		/* length in bytes */
+	dma_addr_t dma;			/* phys. address of descriptor ring */
 } ____cacheline_internodealigned_in_smp;
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */

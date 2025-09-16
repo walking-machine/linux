@@ -141,9 +141,7 @@ static inline u32 libeth_xdpsq_id(u32 num)
 {
 	u32 ret = raw_smp_processor_id();
 
-	if (static_branch_unlikely(&libeth_xdpsq_share) &&
-	    libeth_xdpsq_shared(num))
-		ret %= num;
+	ret %= num;
 
 	return ret;
 }
@@ -785,14 +783,16 @@ __libeth_xdp_tx_flush_bulk(struct libeth_xdp_tx_bulk *bq, u32 flags,
 				       false, 0, prep, fill, xmit);
 	drops = bq->count - sent;
 
+	trace_xdp_bulk_tx(bq->dev, sent, drops, err);
+
 	if (unlikely(drops)) {
+		printk(KERN_WARNING"libeth_xdp_tx_exception\n");
 		libeth_xdp_tx_exception(bq, sent, flags);
 		err = -ENXIO;
 	} else {
 		bq->count = 0;
 	}
 
-	trace_xdp_bulk_tx(bq->dev, sent, drops, err);
 
 	return likely(sent);
 }

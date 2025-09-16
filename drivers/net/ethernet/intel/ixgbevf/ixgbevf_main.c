@@ -678,7 +678,8 @@ static void ixgbevf_clean_xdp_num(struct ixgbevf_ring *xdp_ring, bool in_napi,
 	};
 
 	xdp_frame_bulk_init(&cbulk);
-	xdp_ring->pending -= to_clean;
+	xdp_ring->pending = xdp_ring->pending > to_clean ?
+		xdp_ring->pending - to_clean : 0;
 
 	while (likely(to_clean--)) {
 		libeth_xdp_complete_tx(&xdp_ring->xdp_sqes[ntc], &cp);
@@ -688,33 +689,32 @@ static void ixgbevf_clean_xdp_num(struct ixgbevf_ring *xdp_ring, bool in_napi,
 
 	xdp_ring->next_to_clean = ntc;
 	xdp_flush_frame_bulk(&cbulk);
-
-	return;
 }
 
 static void ixgbevf_xdp_complete(struct ixgbevf_ring *xdp_ring, bool in_napi)
 {
 	u16 ntc = xdp_ring->next_to_clean;
 	u16 to_clean = 0;
-	u32 idx;
 
-	idx = xdp_ring->xdp_sqes[ntc].priv;
 	while (to_clean < xdp_ring->pending) {
-		union ixgbe_adv_tx_desc *rs_desc =
-			IXGBEVF_TX_DESC(xdp_ring, idx);
+		u32 idx = xdp_ring->xdp_sqes[ntc].rs_idx;
+		union ixgbe_adv_tx_desc *rs_desc;
+
+		printk(KERN_WARNING"idx=%u, ntc=%u, to_clean=%u\n", idx, ntc, to_clean);
+		rs_desc = IXGBEVF_TX_DESC(xdp_ring, idx);
 
 		if (!(rs_desc->wb.status & cpu_to_le32(IXGBE_TXD_STAT_DD)))
 			break;
 		rmb();
+		rs_desc->wb.status &= ~cpu_to_le32(IXGBE_TXD_STAT_DD);
 
-		xdp_ring->xdp_sqes[ntc].priv = xdp_ring->count;
 		to_clean +=
 			(idx >= ntc ? idx : idx + xdp_ring->count ) - ntc + 1;
 
-		ntc = idx + 1 == xdp_ring->count ? 0 : idx + 1;
-		idx = xdp_ring->xdp_sqes[ntc].priv;
+		ntc = (idx + 1 == xdp_ring->count) ? 0 : idx + 1;
 	}
 
+	printk(KERN_ERR"pending=%u, to_clean=%u\n", xdp_ring->pending, to_clean);
 	if (!to_clean)
 		return;
 
@@ -723,7 +723,9 @@ static void ixgbevf_xdp_complete(struct ixgbevf_ring *xdp_ring, bool in_napi)
 
 static void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring)
 {
+	netdev_err(xdp_ring->netdev, "1 pending = %u\n", xdp_ring->pending);
 	ixgbevf_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
+	netdev_err(xdp_ring->netdev, "2 pending = %u\n", xdp_ring->pending);
 }
 
 static u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
@@ -783,7 +785,7 @@ static void ixgbevf_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 
 	if (desc.flags & LIBETH_XDP_TX_FIRST) {
 		struct skb_shared_info *sinfo = sq->sqes[i].sinfo;
-		u16 full_len = desc.len + sinfo->nr_frags;
+		u16 full_len = desc.len + sinfo->xdp_frags_size;
 
 		tx_desc->read.olinfo_status =
 				cpu_to_le32((full_len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
@@ -795,7 +797,7 @@ static void ixgbevf_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 }
 
 LIBETH_XDP_DEFINE_START();
-static LIBETH_XDP_DEFINE_FLUSH_TX(ixgbevf_xdp_flush_tx, ixgbevf_prep_xdp_sq, ixgbevf_xdp_xmit_desc);
+LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbevf_xdp_flush_tx, ixgbevf_prep_xdp_sq, ixgbevf_xdp_xmit_desc);
 LIBETH_XDP_DEFINE_END();
 
 static void ixgbevf_xdp_set_rs(struct ixgbevf_ring *xdp_ring, u32 cached_ntu)
@@ -803,8 +805,10 @@ static void ixgbevf_xdp_set_rs(struct ixgbevf_ring *xdp_ring, u32 cached_ntu)
 	u32 ltu = (xdp_ring->next_to_use ? : xdp_ring->count) - 1;
 	union ixgbe_adv_tx_desc *desc;
 
+	printk(KERN_WARNING"ixgbevf_xdp_set_rs ntu=%u, ltu=%u, cached_ntu=%u\n",
+	       xdp_ring->next_to_use, ltu, cached_ntu);
 	desc = IXGBEVF_TX_DESC(xdp_ring, ltu);
-	xdp_ring->xdp_sqes[cached_ntu].priv = ltu;
+	xdp_ring->xdp_sqes[cached_ntu].rs_idx = ltu;
 	desc->read.cmd_type_len |= cpu_to_le32(IXGBE_TXD_CMD);
 }
 
@@ -813,16 +817,26 @@ static void ixgbevf_rx_finalize_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
 {
 	struct ixgbevf_ring *xdp_ring = tx_bulk->xdpsq;
 
+	if (tx_bulk->prog && xdp_ring->count - 16 < xdp_ring->pending)
+		printk(KERN_WARNING"ixgbevf_rx_finalize_xdp count=%u, pending=%u\n", xdp_ring->count, xdp_ring->pending);
+
 	if (!xdp_xmit)
-		return;
+		goto unlock;
 
-	if (tx_bulk->count)
-		ixgbevf_xdp_flush_tx(tx_bulk, 0);
+	printk(KERN_ERR"ixgbevf_rx_finalize_xdp 1\n");
+	if (tx_bulk->count) {
+		printk(KERN_ERR"ixgbevf_rx_finalize_xdp 2\n");
+		ixgbevf_xdp_flush_tx(tx_bulk, LIBETH_XDP_TX_DROP);
+	}
 
+	printk(KERN_ERR"ixgbevf_rx_finalize_xdp 2.5\n");
 	ixgbevf_xdp_set_rs(xdp_ring, cached_ntu);
+	printk(KERN_ERR"ixgbevf_rx_finalize_xdp 3\n");
 
 	wmb();
 	ixgbevf_write_tail(xdp_ring, xdp_ring->next_to_use);
+unlock:
+	rcu_read_unlock();
 }
 
 static int ixgbevf_run_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
@@ -841,7 +855,9 @@ static int ixgbevf_run_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
 	case XDP_PASS:
 		break;
 	case XDP_TX:
-		libeth_xdp_tx_queue_bulk(tx_bulk, xdp, ixgbevf_xdp_flush_tx);
+		result =
+			libeth_xdp_tx_queue_bulk(tx_bulk, xdp, ixgbevf_xdp_flush_tx) ?
+			IXGBEVF_XDP_TX : IXGBEVF_XDP_CONSUMED;
 		if (result == IXGBEVF_XDP_CONSUMED)
 			goto out_failure;
 		break;
@@ -878,7 +894,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 	libeth_xdp_init_buff(xdp, &rx_ring->xdp_stash, &rx_ring->xdp_rxq);
 	libeth_xdp_tx_init_bulk(&xdp_tx_bulk, rx_ring->xdp_prog,
 				adapter->netdev, adapter->xdp_ring,
-				rx_ring->queue_index);
+				adapter->num_xdp_queues);
 	if (xdp_tx_bulk.prog)
 		cached_ntu =
 			((struct ixgbevf_ring *)xdp_tx_bulk.xdpsq)->next_to_use;
@@ -918,6 +934,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 			if (xdp_res == IXGBEVF_XDP_TX)
 				xdp_xmit = true;
 
+			xdp->data = NULL;
 			total_rx_packets++;
 			total_rx_bytes += size;
 			continue;
@@ -992,6 +1009,8 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 	bool clean_complete = true;
 
 	ixgbevf_for_each_ring(ring, q_vector->tx) {
+		if (ring_is_xdp(ring))
+			continue;
 		if (!ixgbevf_clean_tx_irq(q_vector, ring, budget))
 			clean_complete = false;
 	}
@@ -4134,11 +4153,16 @@ static int ixgbevf_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 		if (netif_running(dev))
 			ixgbevf_close(dev);
 
+		netdev_err(dev, "ixgbevf_xdp_setup 1\n");
+
 		ixgbevf_clear_interrupt_scheme(adapter);
+		netdev_err(dev, "ixgbevf_xdp_setup 2\n");
 		ixgbevf_init_interrupt_scheme(adapter);
+		netdev_err(dev, "ixgbevf_xdp_setup 3\n");
 
 		if (netif_running(dev))
 			ixgbevf_open(dev);
+		netdev_err(dev, "ixgbevf_xdp_setup 4\n");
 	} else {
 		for (int i = 0; i < adapter->num_rx_queues; i++)
 			xchg(&adapter->rx_ring[i]->xdp_prog, adapter->xdp_prog);
@@ -4146,6 +4170,7 @@ static int ixgbevf_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 
 	if (old_prog)
 		bpf_prog_put(old_prog);
+	netdev_err(dev, "ixgbevf_xdp_setup 5\n");
 
 	return 0;
 }
