@@ -99,6 +99,8 @@ struct ixgbevf_ring {
 		struct libeth_sqe *xdp_sqes;
 		struct libeth_fqe *rx_fqes;
 	};
+	struct libeth_xdpsq_lock xdpq_lock;
+	u32 cached_ntu;
 	unsigned long state;
 	struct ixgbevf_stats stats;
 	struct u64_stats_sync syncp;
