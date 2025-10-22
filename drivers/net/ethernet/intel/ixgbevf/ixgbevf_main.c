@@ -2109,10 +2109,17 @@ static void ixgbevf_clean_all_tx_rings(struct ixgbevf_adapter *adapter)
 		ixgbevf_clean_xdp_ring(adapter->xdp_ring[i]);
 }
 
+static void ixgbevf_flush_tx_queue(struct ixgbevf_ring *ring)
+{
+	u8 reg_idx = ring->reg_idx;
+
+	IXGBE_WRITE_REG(&ring->q_vector->adapter->hw, IXGBE_VFTXDCTL(reg_idx),
+			IXGBE_TXDCTL_SWFLSH);
+}
+
 void ixgbevf_down(struct ixgbevf_adapter *adapter)
 {
 	struct net_device *netdev = adapter->netdev;
-	struct ixgbe_hw *hw = &adapter->hw;
 	int i;
 
 	/* signal that we are down to the interrupt handler */
@@ -2138,19 +2145,11 @@ void ixgbevf_down(struct ixgbevf_adapter *adapter)
 	timer_delete_sync(&adapter->service_timer);
 
 	/* disable transmits in the hardware now that interrupts are off */
-	for (i = 0; i < adapter->num_tx_queues; i++) {
-		u8 reg_idx = adapter->tx_ring[i]->reg_idx;
+	for (i = 0; i < adapter->num_tx_queues; i++)
+		ixgbevf_flush_tx_queue(adapter->tx_ring[i]);
 
-		IXGBE_WRITE_REG(hw, IXGBE_VFTXDCTL(reg_idx),
-				IXGBE_TXDCTL_SWFLSH);
-	}
-
-	for (i = 0; i < adapter->num_xdp_queues; i++) {
-		u8 reg_idx = adapter->xdp_ring[i]->reg_idx;
-
-		IXGBE_WRITE_REG(hw, IXGBE_VFTXDCTL(reg_idx),
-				IXGBE_TXDCTL_SWFLSH);
-	}
+	for (i = 0; i < adapter->num_xdp_queues; i++)
+		ixgbevf_flush_tx_queue(adapter->xdp_ring[i]);
 
 	if (!pci_channel_offline(adapter->pdev))
 		ixgbevf_reset(adapter);
