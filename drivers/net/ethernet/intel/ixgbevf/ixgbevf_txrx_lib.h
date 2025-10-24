@@ -19,6 +19,11 @@ static inline void ixgbevf_xdp_rs_and_bump(void *xdpsq, bool sent, bool flush)
 		return;
 
 	ltu = (xdp_ring->next_to_use ? : xdp_ring->count) - 1;
+
+	/* We will not get DD on a context descriptor */
+	if (unlikely(xdp_ring->xdp_sqes[ltu].type == LIBETH_SQE_CTX))
+		return;
+
 	desc = IXGBEVF_TX_DESC(xdp_ring, ltu);
 	desc->read.cmd_type_len |= cpu_to_le32(IXGBE_TXD_CMD);
 
@@ -244,6 +249,7 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 
 		xdp_ring->next_to_use = 1;
 		xdp_ring->pending = 1;
+		xdp_ring->xdp_sqes[0].type = LIBETH_SQE_CTX;
 
 		/* Finish descriptor writes before bumping tail */
 		wmb();
