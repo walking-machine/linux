@@ -6,5 +6,5 @@
 
 obj-$(CONFIG_IXGBEVF) += ixgbevf.o
 
-ixgbevf-y := vf.o mbx.o ethtool.o ixgbevf_main.o
+ixgbevf-y := vf.o mbx.o ethtool.o ixgbevf_main.o ixgbevf_xsk.o
 ixgbevf-$(CONFIG_IXGBEVF_IPSEC) += ipsec.o
