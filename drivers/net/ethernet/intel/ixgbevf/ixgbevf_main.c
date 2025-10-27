@@ -754,7 +754,10 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 		per_ring_budget = budget;
 
 	ixgbevf_for_each_ring(ring, q_vector->rx) {
-		int cleaned = ixgbevf_clean_rx_irq(q_vector, ring,
+		int cleaned = ring_is_xsk(ring) ?
+			      ixgbevf_clean_xsk_rx_irq(q_vector, ring,
+						       per_ring_budget) :
+			      ixgbevf_clean_rx_irq(q_vector, ring,
 						   per_ring_budget);
 		work_done += cleaned;
 		if (cleaned >= per_ring_budget)
