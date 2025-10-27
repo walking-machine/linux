@@ -229,8 +229,8 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 	struct ixgbevf_ring *xdp_ring = xdpsq;
 
 	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
-	if (unlikely(ixgbevf_desc_unused(xdp_ring) < LIBETH_XDP_TX_BULK)) {
-		u16 to_clean = ixgbevf_tx_get_num_sent(xdp_ring);
+	if (unlikely(ixgbevf_desc_unused(xdp_ring) < xdp_ring->thresh)) {
+		u16 to_clean = ixgbevf_tx_get_num_sent(xdpsq);
 
 		if (likely(to_clean))
 			ixgbevf_clean_xdp_num(xdp_ring, true, to_clean);
@@ -266,7 +266,7 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 		.lock = &xdp_ring->xdpq_lock,
 		.ntu = &xdp_ring->next_to_use,
 		.pending = &xdp_ring->pending,
-		.pool = NULL,
+		.pool = xdp_ring->xsk_pool,
 		.sqes = xdp_ring->xdp_sqes,
 	};
 
