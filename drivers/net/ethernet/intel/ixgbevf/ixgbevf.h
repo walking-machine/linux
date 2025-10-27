@@ -66,6 +66,7 @@ enum ixgbevf_ring_state_t {
 	__IXGBEVF_HANG_CHECK_ARMED,
 	__IXGBEVF_TX_XDP_RING,
 	__IXGBEVF_TX_XDP_RING_PRIMED,
+	__IXGBEVF_RXTX_XSK_RING,
 };
 
 #define ring_is_xdp(ring) \
@@ -75,30 +76,40 @@ enum ixgbevf_ring_state_t {
 #define clear_ring_xdp(ring) \
 		clear_bit(__IXGBEVF_TX_XDP_RING, &(ring)->state)
 
+#define ring_is_xsk(ring) \
+		test_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+#define set_ring_xsk(ring) \
+		set_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+#define clear_ring_xsk(ring) \
+		clear_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+
 struct ixgbevf_ring {
 	struct ixgbevf_ring *next;
 	struct ixgbevf_q_vector *q_vector;	/* backpointer to q_vector */
 	struct net_device *netdev;
 	struct bpf_prog __rcu *xdp_prog;
 	struct device *dev;
-	struct page_pool *pp;		/* Regular Rx ring */
-	void *desc;			/* descriptor ring memory */
 	union {
-		u32 truesize;		/* Rx buffer full size */
-		u32 pending;		/* Sent-not-completed descriptors */
+		struct page_pool *pp;		/* Regular Rx ring */
+		struct xsk_buff_pool *xsk_pool;	/* AF_XDP ZC rings */
 	};
+	void *desc;			/* descriptor ring memory */
+	u32 truesize;			/* Rx buffer full size */
 	u32 hdr_truesize;		/* Rx header buffer full size */
 	u16 count;			/* amount of descriptors */
 	u16 next_to_clean;
 	u32 next_to_use;
+	u32 pending;			/* Sent-not-completed descriptors */
 	u32 rx_buf_len;
 
 	union {
 		struct libeth_fqe *rx_fqes;
+		struct libeth_xdp_buff	**xsk_fqes;
 		struct ixgbevf_tx_buffer *tx_buffer_info;
 		struct libeth_sqe *xdp_sqes;
 	};
 	u32 cached_ntu;
+	u32 thresh;
 	unsigned long state;
 	struct ixgbevf_stats stats;
 	struct u64_stats_sync syncp;
@@ -106,6 +117,7 @@ struct ixgbevf_ring {
 		struct ixgbevf_tx_queue_stats tx_stats;
 		struct ixgbevf_rx_queue_stats rx_stats;
 	};
+	struct libeth_xdp_buff *xsk_xdp_head;
 	struct libeth_xdpsq_lock xdpq_lock;
 	struct libeth_xdpsq_timer *xdp_timer;
 	struct libeth_fqe *hdr_fqes;
@@ -397,14 +409,28 @@ int ixgbevf_open(struct net_device *netdev);
 int ixgbevf_close(struct net_device *netdev);
 void ixgbevf_up(struct ixgbevf_adapter *adapter);
 void ixgbevf_down(struct ixgbevf_adapter *adapter);
+void ixgbevf_flush_tx_queue(struct ixgbevf_ring *ring);
+void ixgbevf_disable_rx_queue(struct ixgbevf_adapter *adapter,
+			      struct ixgbevf_ring *ring);
+void ixgbevf_rx_desc_queue_enable(struct ixgbevf_adapter *adapter,
+				  struct ixgbevf_ring *ring);
 void ixgbevf_reinit_locked(struct ixgbevf_adapter *adapter);
 void ixgbevf_reset(struct ixgbevf_adapter *adapter);
 void ixgbevf_set_ethtool_ops(struct net_device *netdev);
 int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 			       struct ixgbevf_ring *rx_ring);
+void ixgbevf_irq_enable(struct ixgbevf_adapter *adapter);
+void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
+			       struct ixgbevf_ring *ring);
 int ixgbevf_setup_tx_resources(struct ixgbevf_ring *);
+void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
+			       struct ixgbevf_ring *ring);
 void ixgbevf_free_rx_resources(struct ixgbevf_ring *);
+void ixgbevf_clean_rx_ring(struct ixgbevf_ring *rx_ring);
+void ixgbevf_rx_destroy_pp(struct ixgbevf_ring *rx_ring);
 void ixgbevf_free_tx_resources(struct ixgbevf_ring *);
+void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring);
+void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring);
 void ixgbevf_update_stats(struct ixgbevf_adapter *adapter);
 int ethtool_ioctl(struct ifreq *ifr);
 
