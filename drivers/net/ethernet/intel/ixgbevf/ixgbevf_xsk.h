@@ -9,8 +9,10 @@
 
 int ixgbevf_setup_xsk_pool(struct ixgbevf_adapter *adapter,
 			   struct xsk_buff_pool *pool, u16 qid);
-void ixgbevf_xsk_alloc_rx_bufs(struct ixgbevf_ring *rx_ring, u32 num);
+bool ixgbevf_xsk_alloc_rx_bufs(struct ixgbevf_ring *rx_ring, u32 num);
 void ixgbevf_rx_xsk_ring_free_buffs(struct ixgbevf_ring *rx_ring);
+u32 ixgbevf_clean_xsk_rx_irq(struct ixgbevf_q_vector *q_vector,
+			     struct ixgbevf_ring *rx_ring, int budget);
 bool ixgbevf_clean_xsk_tx_irq(struct ixgbevf_q_vector *q_vector,
 			      struct ixgbevf_ring *tx_ring, int napi_budget);
 
