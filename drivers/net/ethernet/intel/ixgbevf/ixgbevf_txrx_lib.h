@@ -24,6 +24,7 @@ static inline bool ixgbevf_is_non_eop(struct ixgbevf_ring *rx_ring,
 	/* fetch, update, and store next to clean */
 	ntc = (ntc < rx_ring->count) ? ntc : 0;
 	rx_ring->next_to_clean = ntc;
+	rx_ring->pending++;
 
 	prefetch(IXGBEVF_RX_DESC(rx_ring, ntc));
 
