@@ -279,3 +279,27 @@ bool ixgbevf_clean_xsk_tx_irq(struct ixgbevf_q_vector *q_vector,
 				       ixgbevf_xsk_xmit_desc,
 				       ixgbevf_xdp_rs_and_bump);
 }
+
+int ixgbevf_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags)
+{
+	struct ixgbevf_adapter *adapter = netdev_priv(dev);
+	struct ixgbevf_q_vector *q_vector;
+	struct ixgbevf_ring *rx_ring;
+
+	if (unlikely(test_bit(__IXGBEVF_DOWN, &adapter->state)))
+		return -ENETDOWN;
+
+	if (unlikely(queue_id >= adapter->num_xdp_queues))
+		return -EINVAL;
+
+	rx_ring = adapter->rx_ring[queue_id];
+	if (unlikely(!ring_is_xsk(rx_ring)))
+		return -EINVAL;
+
+	q_vector = rx_ring->q_vector;
+	if (!napi_if_scheduled_mark_missed(&q_vector->napi))
+		IXGBE_WRITE_REG(&adapter->hw, IXGBE_VTEICS,
+				BIT(q_vector->v_idx));
+
+	return 0;
+}
