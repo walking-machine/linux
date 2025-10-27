@@ -3,7 +3,8 @@
 
 #include <net/libeth/xsk.h>
 
-#include "ixgbevf.h"
+#include "ixgbevf_txrx_lib.h"
+#include "ixgbevf_xdp_lib.h"
 #include "ixgbevf_xsk.h"
 
 /**
@@ -130,4 +131,35 @@ void ixgbevf_rx_xsk_ring_free_buffs(struct ixgbevf_ring *rx_ring)
 		ntc++;
 		ntc = ntc == rx_ring->count ? 0 : ntc;
 	}
+}
+
+static void ixgbevf_xsk_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
+				  const struct libeth_xdpsq *sq, u64 priv)
+{
+	union ixgbe_adv_tx_desc *tx_desc =
+		&((union ixgbe_adv_tx_desc *)sq->descs)[i];
+
+	u32 cmd_type = IXGBE_ADVTXD_DTYP_DATA |
+		       IXGBE_ADVTXD_DCMD_DEXT |
+		       IXGBE_ADVTXD_DCMD_IFCS |
+		       IXGBE_TXD_CMD_EOP |
+		       desc.len;
+
+	tx_desc->read.olinfo_status =
+		cpu_to_le32((desc.len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
+			    IXGBE_ADVTXD_CC);
+
+	tx_desc->read.buffer_addr = cpu_to_le64(desc.addr);
+	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
+}
+
+bool ixgbevf_clean_xsk_tx_irq(struct ixgbevf_q_vector *q_vector,
+			      struct ixgbevf_ring *tx_ring, int napi_budget)
+{
+	u32 budget = min_t(u32, napi_budget, tx_ring->thresh);
+
+	return libeth_xsk_xmit_do_bulk(tx_ring->xsk_pool, tx_ring, budget,
+				       NULL, ixgbevf_prep_xdp_sq,
+				       ixgbevf_xsk_xmit_desc,
+				       ixgbevf_xdp_rs_and_bump);
 }
