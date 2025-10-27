@@ -4171,6 +4171,7 @@ static const struct net_device_ops ixgbevf_netdev_ops = {
 	.ndo_features_check	= ixgbevf_features_check,
 	.ndo_bpf		= ixgbevf_xdp,
 	.ndo_xdp_xmit		= ixgbevf_xdp_xmit,
+	.ndo_xsk_wakeup		= ixgbevf_xsk_wakeup,
 };
 
 static void ixgbevf_assign_netdev_ops(struct net_device *dev)
@@ -4303,7 +4304,7 @@ static int ixgbevf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			    NETIF_F_HW_VLAN_CTAG_TX;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
-	libeth_xdp_set_features_noredir(netdev, NULL, 0, NULL);
+	libeth_xdp_set_features_noredir(netdev, NULL, 1, NULL);
 
 	/* MTU range: 68 - 1504 or 9710 */
 	netdev->min_mtu = ETH_MIN_MTU;
