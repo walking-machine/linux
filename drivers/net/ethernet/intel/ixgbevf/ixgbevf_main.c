@@ -733,10 +733,13 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 	bool clean_complete = true;
 
 	ixgbevf_for_each_ring(ring, q_vector->tx) {
-		if (ring_is_xdp(ring))
-			continue;
-		if (!ixgbevf_clean_tx_irq(q_vector, ring, budget))
-			clean_complete = false;
+		if (ring_is_xsk(ring))
+			clean_complete &=
+				ixgbevf_clean_xsk_tx_irq(q_vector, ring,
+							 budget);
+		else if (!ring_is_xdp(ring))
+			clean_complete &=
+				ixgbevf_clean_tx_irq(q_vector, ring, budget);
 	}
 
 	if (budget <= 0)
@@ -1221,6 +1224,9 @@ void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 		set_ring_xsk(ring);
 	else
 		clear_ring_xsk(ring);
+
+	ring->thresh = ring_is_xsk(ring) ? IXGBEVF_XSK_TX_CLEAN_THRESH(ring) :
+					   XDP_BULK_QUEUE_SIZE;
 
 	clear_bit(__IXGBEVF_HANG_CHECK_ARMED, &ring->state);
 	clear_bit(__IXGBEVF_TX_XDP_RING_PRIMED, &ring->state);
