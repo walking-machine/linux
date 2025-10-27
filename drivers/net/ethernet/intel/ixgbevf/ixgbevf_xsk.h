@@ -15,5 +15,6 @@ u32 ixgbevf_clean_xsk_rx_irq(struct ixgbevf_q_vector *q_vector,
 			     struct ixgbevf_ring *rx_ring, int budget);
 bool ixgbevf_clean_xsk_tx_irq(struct ixgbevf_q_vector *q_vector,
 			      struct ixgbevf_ring *tx_ring, int napi_budget);
+int ixgbevf_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags);
 
 #endif /* _IXGBEVF_XSK_H_ */
