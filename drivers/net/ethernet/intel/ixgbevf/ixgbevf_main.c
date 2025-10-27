@@ -33,6 +33,7 @@
 #include <net/libeth/xsk.h>
 #include <net/xfrm.h>
 
+#include "ixgbevf_txrx.h"
 #include "ixgbevf_xdp_lib.h"
 #include "ixgbevf_xsk.h"
 
@@ -501,9 +502,9 @@ static inline void ixgbevf_rx_checksum(struct ixgbevf_ring *ring,
  * order to populate the checksum, VLAN, protocol, and other fields within
  * the skb.
  **/
-static void ixgbevf_process_skb_fields(struct ixgbevf_ring *rx_ring,
-				       union ixgbe_adv_rx_desc *rx_desc,
-				       struct sk_buff *skb)
+void ixgbevf_process_skb_fields(struct ixgbevf_ring *rx_ring,
+				union ixgbe_adv_rx_desc *rx_desc,
+				struct sk_buff *skb)
 {
 	ixgbevf_rx_hash(rx_ring, rx_desc, skb);
 	ixgbevf_rx_checksum(rx_ring, rx_desc, skb);
@@ -518,33 +519,6 @@ static void ixgbevf_process_skb_fields(struct ixgbevf_ring *rx_ring,
 
 	if (ixgbevf_test_staterr(rx_desc, IXGBE_RXDADV_STAT_SECP))
 		ixgbevf_ipsec_rx(rx_ring, rx_desc, skb);
-}
-
-/**
- * ixgbevf_is_non_eop - process handling of non-EOP buffers
- * @rx_ring: Rx ring being processed
- * @rx_desc: Rx descriptor for current buffer
- *
- * This function updates next to clean.  If the buffer is an EOP buffer
- * this function exits returning false, otherwise it will place the
- * sk_buff in the next buffer to be chained and return true indicating
- * that this is in fact a non-EOP buffer.
- **/
-static bool ixgbevf_is_non_eop(struct ixgbevf_ring *rx_ring,
-			       union ixgbe_adv_rx_desc *rx_desc)
-{
-	u32 ntc = rx_ring->next_to_clean + 1;
-
-	/* fetch, update, and store next to clean */
-	ntc = (ntc < rx_ring->count) ? ntc : 0;
-	rx_ring->next_to_clean = ntc;
-
-	prefetch(IXGBEVF_RX_DESC(rx_ring, ntc));
-
-	if (likely(ixgbevf_test_staterr(rx_desc, IXGBE_RXD_STAT_EOP)))
-		return false;
-
-	return true;
 }
 
 /**
@@ -638,9 +612,9 @@ static void ixgbevf_alloc_rx_buffers(struct ixgbevf_ring *rx_ring,
  *
  * Returns true if an error was encountered and skb was freed.
  **/
-static bool ixgbevf_cleanup_headers(struct ixgbevf_ring *rx_ring,
-				    union ixgbe_adv_rx_desc *rx_desc,
-				    struct sk_buff *skb)
+bool ixgbevf_cleanup_headers(struct ixgbevf_ring *rx_ring,
+			     union ixgbe_adv_rx_desc *rx_desc,
+			     struct sk_buff *skb)
 {
 	/* verify that the packet does not have any known errors */
 	if (unlikely(ixgbevf_test_staterr(rx_desc,
@@ -939,7 +913,10 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 		per_ring_budget = budget;
 
 	ixgbevf_for_each_ring(ring, q_vector->rx) {
-		int cleaned = ixgbevf_clean_rx_irq(q_vector, ring,
+		int cleaned = ring_is_xsk(ring) ?
+			      ixgbevf_clean_xsk_rx_irq(q_vector, ring,
+						       per_ring_budget) :
+			      ixgbevf_clean_rx_irq(q_vector, ring,
 						   per_ring_budget);
 		work_done += cleaned;
 		if (cleaned >= per_ring_budget)
