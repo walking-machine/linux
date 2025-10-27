@@ -664,7 +664,8 @@ static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
 void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring)
 {
 	libeth_xdpsq_deinit_timer(xdp_ring->xdp_timer);
-	ixgbevf_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
+	ixgbevf_clean_xdp_num(xdp_ring, false, xdp_ring->pending,
+			      ring_is_xsk(xdp_ring));
 }
 
 static void ixgbevf_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
@@ -914,10 +915,13 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 	bool clean_complete = true;
 
 	ixgbevf_for_each_ring(ring, q_vector->tx) {
-		if (ring_is_xdp(ring))
-			continue;
-		if (!ixgbevf_clean_tx_irq(q_vector, ring, budget))
-			clean_complete = false;
+		if (ring_is_xsk(ring))
+			clean_complete &=
+				ixgbevf_clean_xsk_tx_irq(q_vector, ring,
+							 budget);
+		else if (!ring_is_xdp(ring))
+			clean_complete &=
+				ixgbevf_clean_tx_irq(q_vector, ring, budget);
 	}
 
 	if (budget <= 0)
@@ -1403,6 +1407,11 @@ void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 		set_ring_xsk(ring);
 	else
 		clear_ring_xsk(ring);
+
+	ring->thresh = ring_is_xsk(ring) ? IXGBEVF_XSK_TX_CLEAN_THRESH(ring) :
+					   libeth_xdp_queue_threshold(ring->count);
+	ring->complete_budget = ring_is_xsk(ring) ?
+				IXGBEVF_XSK_TX_CLEAN_BUDGET : ring->thresh;
 
 	clear_bit(__IXGBEVF_HANG_CHECK_ARMED, &ring->state);
 	clear_bit(__IXGBEVF_TX_XDP_RING_PRIMED, &ring->state);
