@@ -326,6 +326,8 @@ static int ixgbevf_set_ringparam(struct net_device *netdev,
 			/* clone ring and setup updated count */
 			rx_ring[i] = *adapter->rx_ring[i];
 
+			rx_ring[i].pp = NULL;
+			rx_ring[i].hdr_pp = NULL;
 			rx_ring[i].next_to_clean = 0;
 			rx_ring[i].next_to_use = 0;
 			rx_ring[i].xdp_stash.data = NULL;
