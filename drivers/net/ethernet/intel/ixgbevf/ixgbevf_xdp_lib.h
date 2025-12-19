@@ -141,6 +141,9 @@ static inline void ixgbevf_xdp_rs_and_bump(void *xdpsq, bool sent, bool flush)
 	xdp_ring->xdp_sqes[xdp_ring->cached_ntu].rs_idx = ltu + 1;
 	xdp_ring->cached_ntu = xdp_ring->next_to_use;
 
+	/* In case the packet was interrupted, discard it */
+	xdp_ring->xdp_sqes[ltu].priv = 0;
+
 	/* Finish descriptor writes before bumping tail */
 	wmb();
 	ixgbevf_write_tail(xdp_ring, xdp_ring->next_to_use);

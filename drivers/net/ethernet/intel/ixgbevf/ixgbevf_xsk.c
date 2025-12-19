@@ -136,24 +136,73 @@ void ixgbevf_rx_xsk_ring_free_buffs(struct ixgbevf_ring *rx_ring)
 	}
 }
 
+struct ixgbevf_zc_sqe_priv {
+	u16 first_desc;
+	u16 len;
+};
+
+static_assert(sizeof(struct ixgbevf_zc_sqe_priv) <=
+	      sizeof_field(struct libeth_sqe, priv));
+
 static void ixgbevf_xsk_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 				  const struct libeth_xdpsq *sq, u64 priv)
 {
-	union ixgbe_adv_tx_desc *tx_desc =
-		&((union ixgbe_adv_tx_desc *)sq->descs)[i];
+	union ixgbe_adv_tx_desc *descs = sq->descs, *tx_desc = &descs[i];
+	u32 ltu = (i ? : sq->count) - 1;
 
 	u32 cmd_type = IXGBE_ADVTXD_DTYP_DATA |
 		       IXGBE_ADVTXD_DCMD_DEXT |
 		       IXGBE_ADVTXD_DCMD_IFCS |
-		       IXGBE_TXD_CMD_EOP |
 		       desc.len;
 
-	tx_desc->read.olinfo_status =
-		cpu_to_le32((desc.len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
-			    IXGBE_ADVTXD_CC);
-
 	tx_desc->read.buffer_addr = cpu_to_le64(desc.addr);
-	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
+
+	if (likely((desc.flags & LIBETH_XDP_TX_LAST) && !sq->sqes[ltu].priv)) {
+		tx_desc->read.olinfo_status =
+			cpu_to_le32((desc.len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
+				    IXGBE_ADVTXD_CC);
+		tx_desc->read.cmd_type_len =
+			cpu_to_le32(cmd_type | IXGBE_TXD_CMD_EOP);
+		return;
+	}
+
+	/* No previous packet */
+	if (!sq->sqes[ltu].priv) {
+		struct ixgbevf_zc_sqe_priv *sqe_priv =
+						(void *)&sq->sqes[i].priv;
+
+		sqe_priv->first_desc = i;
+		sqe_priv->len = desc.len;
+
+		tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
+
+		return;
+	}
+
+	if (sq->sqes[ltu].priv) {
+		struct ixgbevf_zc_sqe_priv *sqe_priv =
+						(void *)&sq->sqes[i].priv;
+
+		sq->sqes[i].priv = sq->sqes[ltu].priv;
+		sq->sqes[ltu].priv = 0;
+		sqe_priv->len += desc.len;
+
+		if (desc.flags & LIBETH_XDP_TX_LAST) {
+			union ixgbe_adv_tx_desc *first_desc =
+						&descs[sqe_priv->first_desc];
+
+			first_desc->read.olinfo_status =
+				cpu_to_le32((sqe_priv->len <<
+					     IXGBE_ADVTXD_PAYLEN_SHIFT) |
+					    IXGBE_ADVTXD_CC);
+			tx_desc->read.cmd_type_len =
+				cpu_to_le32(cmd_type | IXGBE_TXD_CMD_EOP);
+			cmd_type |= IXGBE_TXD_CMD_EOP;
+			sq->sqes[i].priv = 0;
+		}
+
+		tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
+	}
 }
 
 LIBETH_XDP_DEFINE_START();

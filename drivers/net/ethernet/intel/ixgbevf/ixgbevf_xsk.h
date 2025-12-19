@@ -6,6 +6,7 @@
 
 /* Process completions as soon as possible */
 #define IXGBEVF_XSK_TX_CLEAN_THRESH(r)	((r)->count - 1)
+#define IXGBEVF_XSK_MAX_ZC_FRAGS	min(18, MAX_SKB_FRAGS)
 
 int ixgbevf_setup_xsk_pool(struct ixgbevf_adapter *adapter,
 			   struct xsk_buff_pool *pool, u16 qid);

@@ -4304,7 +4304,7 @@ static int ixgbevf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			    NETIF_F_HW_VLAN_CTAG_TX;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
-	libeth_xdp_set_features_noredir(netdev, NULL, 1, NULL);
+	libeth_xdp_set_features_noredir(netdev, NULL, IXGBEVF_XSK_MAX_ZC_FRAGS);
 
 	/* MTU range: 68 - 1504 or 9710 */
 	netdev->min_mtu = ETH_MIN_MTU;
