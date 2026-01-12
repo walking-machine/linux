@@ -3,6 +3,7 @@
 
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
 #include <linux/errno.h>
@@ -19,14 +20,34 @@ static unsigned int idx;
 int adjust_value = 0;
 int count = 0;
 
+#define eth_check_loopback(h, de)			\
+({							\
+	if ((h) + 1 > (de))				\
+		return XDP_PASS;			\
+							\
+	if (bpf_htons(ETH_P_LOOPBACK) != (h)->h_proto)	\
+		return XDP_PASS;			\
+})
+
 SEC("xdp.frags") int xsk_def_prog(struct xdp_md *xdp)
 {
+	void *data = (void *)(long)xdp->data;
+	void *data_end = (void *)(long)xdp->data_end;
+	struct ethhdr *eth = data;
+
+	eth_check_loopback(eth, data_end);
+
 	return bpf_redirect_map(&xsk, 0, XDP_DROP);
 }
 
 SEC("xdp.frags") int xsk_xdp_drop(struct xdp_md *xdp)
 {
 	static unsigned int drop_idx;
+	void *data = (void *)(long)xdp->data;
+	void *data_end = (void *)(long)xdp->data_end;
+	struct ethhdr *eth = data;
+
+	eth_check_loopback(eth, data_end);
 
 	/* Drop every other packet */
 	if (drop_idx++ % 2)
@@ -37,9 +58,14 @@ SEC("xdp.frags") int xsk_xdp_drop(struct xdp_md *xdp)
 
 SEC("xdp.frags") int xsk_xdp_populate_metadata(struct xdp_md *xdp)
 {
-	void *data, *data_meta;
+	void *data_end = (void *)(long)xdp->data_end;
+	void *data = (void *)(long)xdp->data;
+	struct ethhdr *eth = data;
 	struct xdp_info *meta;
+	void *data_meta;
 	int err;
+
+	eth_check_loopback(eth, data_end);
 
 	/* Reserve enough for all custom metadata. */
 	err = bpf_xdp_adjust_meta(xdp, -(int)sizeof(struct xdp_info));
@@ -64,6 +90,8 @@ SEC("xdp") int xsk_xdp_shared_umem(struct xdp_md *xdp)
 	void *data_end = (void *)(long)xdp->data_end;
 	struct ethhdr *eth = data;
 
+	eth_check_loopback(eth, data_end);
+
 	if (eth + 1 > data_end)
 		return XDP_DROP;
 
@@ -77,8 +105,13 @@ SEC("xdp") int xsk_xdp_shared_umem(struct xdp_md *xdp)
 
 SEC("xdp.frags") int xsk_xdp_adjust_tail(struct xdp_md *xdp)
 {
+	void *data = (void *)(long)xdp->data;
+	void *data_end = (void *)(long)xdp->data_end;
+	struct ethhdr *eth = data;
 	__u32 buff_len, curr_buff_len;
 	int ret;
+
+	eth_check_loopback(eth, data_end);
 
 	buff_len = bpf_xdp_get_buff_len(xdp);
 	if (buff_len == 0)
