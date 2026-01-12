@@ -28,7 +28,7 @@
 /* Just to align the data in the packet */
 #define PKT_HDR_SIZE			(sizeof(struct ethhdr) + 2)
 #define POLL_TMOUT			1000
-#define THREAD_TMOUT			3
+#define THREAD_TMOUT			20
 #define UMEM_HEADROOM_TEST_SIZE		128
 #define XSK_DESC__INVALID_OPTION	(0xffff)
 #define XSK_UMEM__INVALID_FRAME_SIZE	(MAX_ETH_JUMBO_SIZE + 1)
