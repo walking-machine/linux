@@ -1351,6 +1351,9 @@ void ixgbevf_disable_rx_queue(struct ixgbevf_adapter *adapter,
 	if (!wait_loop)
 		pr_err("RXDCTL.ENABLE queue %d not cleared while polling\n",
 		       reg_idx);
+	
+	/* Specification calls for 100 usec of delay after RXDCTL.ENABLE is cleared */
+	udelay(100);
 }
 
 void ixgbevf_rx_desc_queue_enable(struct ixgbevf_adapter *adapter,
