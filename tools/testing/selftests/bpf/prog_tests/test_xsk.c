@@ -862,10 +862,25 @@ static bool is_frag_valid(struct xsk_umem_info *umem, u64 addr, u32 len, u32 exp
 	}
 
 	words_to_end = len / sizeof(*pkt_data) - 1;
+
+	for (int i = 1; i < words_to_end; i++) {
+		u32 seqnum = ntohl(pkt_data[i]) & 0xffff;
+		u32 pkti = ntohl(pkt_data[i]) >> 16;
+		if (++expected_seqnum != seqnum) {
+			ksft_print_msg("[%s] expected seqnum in the middle [%u], got seqnum [%u]\n",
+				       __func__, expected_seqnum, seqnum);
+			goto error;
+		}
+		if (expected_pkt_nb != pkti) {
+			ksft_print_msg("[%s] expected pkt_nb in the middle [%u], got pkt_nb [%u]\n",
+				       __func__, expected_pkt_nb, pkti);
+			goto error;
+		}
+	}
+
 	pkt_data += words_to_end;
 	seqnum = ntohl(*pkt_data) & 0xffff;
-	expected_seqnum += words_to_end;
-	if (expected_seqnum != seqnum) {
+	if (++expected_seqnum != seqnum) {
 		ksft_print_msg("[%s] expected seqnum at end [%u], got seqnum [%u]\n",
 			       __func__, expected_seqnum, seqnum);
 		goto error;
