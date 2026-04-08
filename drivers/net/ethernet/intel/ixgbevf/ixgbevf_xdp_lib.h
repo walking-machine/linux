@@ -8,29 +8,33 @@
 
 #include "ixgbevf.h"
 
-static inline u16 ixgbevf_tx_get_num_sent(struct ixgbevf_ring *xdp_ring)
+static inline u16 ixgbevf_tx_get_num_sent(struct ixgbevf_ring *tx_ring,
+					  u16 budget)
 {
-	u16 ntc = xdp_ring->next_to_clean;
+	u16 ntc = tx_ring->next_to_clean;
 	u16 to_clean = 0;
 
-	while (likely(to_clean < xdp_ring->pending)) {
-		u32 idx = xdp_ring->xdp_sqes[ntc].rs_idx;
+	while (likely(to_clean < tx_ring->pending) &&
+	       likely(to_clean < budget)) {
+		u32 idx = tx_ring->xdp_sqes[ntc].rs_idx;
 		union ixgbe_adv_tx_desc *rs_desc;
 
 		if (!idx--)
 			break;
 
-		rs_desc = IXGBEVF_TX_DESC(xdp_ring, idx);
+		smp_rmb();
+
+		rs_desc = IXGBEVF_TX_DESC(tx_ring, idx);
 
 		if (!(rs_desc->wb.status & cpu_to_le32(IXGBE_TXD_STAT_DD)))
 			break;
 
-		xdp_ring->xdp_sqes[ntc].rs_idx = 0;
+		tx_ring->xdp_sqes[ntc].rs_idx = 0;
 
 		to_clean +=
-			(idx >= ntc ? idx : idx + xdp_ring->count) - ntc + 1;
+			(idx >= ntc ? idx : idx + tx_ring->count) - ntc + 1;
 
-		ntc = (idx + 1 == xdp_ring->count) ? 0 : idx + 1;
+		ntc = (idx + 1 == tx_ring->count) ? 0 : idx + 1;
 	}
 
 	return to_clean;
@@ -74,7 +78,7 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 
 	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
 	if (unlikely(ixgbevf_desc_unused(xdp_ring) < xdp_ring->thresh)) {
-		u16 to_clean = ixgbevf_tx_get_num_sent(xdpsq);
+		u16 to_clean = ixgbevf_tx_get_num_sent(xdp_ring, xdp_ring->count);
 
 		if (likely(to_clean))
 			ixgbevf_clean_xdp_num(xdp_ring, true, to_clean);

@@ -450,11 +450,11 @@ static const struct xfrmdev_ops ixgbevf_xfrmdev_ops = {
  * @first: current data packet
  * @itd: ipsec Tx data for later use in building context descriptor
  **/
-int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring,
-		     struct ixgbevf_tx_buffer *first,
+int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring, struct libeth_sqe *first,
 		     struct ixgbevf_ipsec_tx_data *itd)
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(tx_ring->netdev);
+	struct ixgbevf_skb_sqe_priv *sqe_priv = (void *)&first->priv;
 	struct ixgbevf_ipsec *ipsec = adapter->ipsec;
 	struct xfrm_state *xs;
 	struct sec_path *sp;
@@ -491,12 +491,12 @@ int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring,
 
 	itd->pfsa = tsa->pfsa - IXGBE_IPSEC_BASE_TX_INDEX;
 
-	first->tx_flags |= IXGBE_TX_FLAGS_IPSEC | IXGBE_TX_FLAGS_CSUM;
+	sqe_priv->tx_flags |= IXGBE_TX_FLAGS_IPSEC | IXGBE_TX_FLAGS_CSUM;
 
 	if (xs->id.proto == IPPROTO_ESP) {
 		itd->flags |= IXGBE_ADVTXD_TUCMD_IPSEC_TYPE_ESP |
 			      IXGBE_ADVTXD_TUCMD_L4T_TCP;
-		if (first->protocol == htons(ETH_P_IP))
+		if (sqe_priv->protocol == htons(ETH_P_IP))
 			itd->flags |= IXGBE_ADVTXD_TUCMD_IPV4;
 
 		/* The actual trailer length is authlen (16 bytes) plus
