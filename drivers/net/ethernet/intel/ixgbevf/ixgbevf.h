@@ -11,7 +11,7 @@
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/u64_stats_sync.h>
-#include <net/libeth/types.h>
+#include <net/libeth/tx.h>
 #include <net/xdp.h>
 
 #include "vf.h"
@@ -24,24 +24,12 @@
 #define TXD_USE_COUNT(S) DIV_ROUND_UP((S), IXGBE_MAX_DATA_PER_TXD)
 #define DESC_NEEDED (MAX_SKB_FRAGS + 4)
 
-/* wrapper around a pointer to a socket buffer,
- * so a DMA handle can be stored along with the buffer
- */
-struct ixgbevf_tx_buffer {
-	union ixgbe_adv_tx_desc *next_to_watch;
-	unsigned long time_stamp;
-	union {
-		struct sk_buff *skb;
-		/* XDP uses address ptr on irq_clean */
-		void *data;
-	};
-	unsigned int bytecount;
-	unsigned short gso_segs;
-	__be16 protocol;
-	DEFINE_DMA_UNMAP_ADDR(dma);
-	DEFINE_DMA_UNMAP_LEN(len);
+struct ixgbevf_skb_sqe_priv {
 	u32 tx_flags;
+	__be16 protocol;
 };
+static_assert(sizeof(struct ixgbevf_skb_sqe_priv) <=
+	      sizeof(typeof_member(struct libeth_sqe, priv)));
 
 struct ixgbevf_stats {
 	u64 packets;
@@ -96,8 +84,8 @@ struct ixgbevf_ring {
 
 	union {
 		struct libeth_fqe *rx_fqes;
-		struct ixgbevf_tx_buffer *tx_buffer_info;
 		struct libeth_sqe *xdp_sqes;
+		struct libeth_sqe *tx_sqes;
 	};
 	struct libeth_xdpsq_lock xdpq_lock;
 	u32 cached_ntu;
@@ -433,8 +421,7 @@ void ixgbevf_ipsec_restore(struct ixgbevf_adapter *adapter);
 void ixgbevf_ipsec_rx(struct ixgbevf_ring *rx_ring,
 		      union ixgbe_adv_rx_desc *rx_desc,
 		      struct sk_buff *skb);
-int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring,
-		     struct ixgbevf_tx_buffer *first,
+int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring, struct libeth_sqe *first,
 		     struct ixgbevf_ipsec_tx_data *itd);
 #else
 static inline void ixgbevf_init_ipsec_offload(struct ixgbevf_adapter *adapter)
