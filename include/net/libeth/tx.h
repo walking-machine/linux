@@ -74,7 +74,7 @@ struct libeth_sqe {
 	u32				packets;
 	u32				bytes;
 
-	unsigned long			priv;
+	u64				priv;
 } __aligned_largest;
 
 /**
