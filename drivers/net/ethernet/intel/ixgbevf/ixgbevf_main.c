@@ -2035,47 +2035,31 @@ static void ixgbevf_napi_disable_all(struct ixgbevf_adapter *adapter)
 	}
 }
 
-static int ixgbevf_configure_dcb(struct ixgbevf_adapter *adapter)
+static void ixgbevf_configure_dcb(struct ixgbevf_adapter *adapter)
 {
-	struct ixgbe_hw *hw = &adapter->hw;
-	unsigned int def_q = 0;
-	unsigned int num_tcs = 0;
 	unsigned int num_rx_queues = adapter->num_rx_queues;
 	unsigned int num_tx_queues = adapter->num_tx_queues;
-	int err;
 
-	spin_lock_bh(&adapter->mbx_lock);
-
-	/* fetch queue configuration from the PF */
-	err = ixgbevf_get_queues(hw, &num_tcs, &def_q);
-
-	spin_unlock_bh(&adapter->mbx_lock);
-
-	if (err)
-		return err;
-
-	if (num_tcs > 1) {
+	if (adapter->q_caps.num_tcs > 1) {
 		/* we need only one Tx queue */
 		num_tx_queues = 1;
 
 		/* update default Tx ring register index */
-		adapter->tx_ring[0]->reg_idx = def_q;
+		adapter->tx_ring[0]->reg_idx = adapter->q_caps.def_tc;
 
 		/* we need as many queues as traffic classes */
-		num_rx_queues = num_tcs;
+		num_rx_queues = adapter->q_caps.num_tcs;
 	}
 
 	/* if we have a bad config abort request queue reset */
 	if ((adapter->num_rx_queues != num_rx_queues) ||
 	    (adapter->num_tx_queues != num_tx_queues)) {
 		/* force mailbox timeout to prevent further messages */
-		hw->mbx.timeout = 0;
+		adapter->hw.mbx.timeout = 0;
 
 		/* wait for watchdog to come around and bail us out */
 		set_bit(__IXGBEVF_QUEUE_RESET_REQUESTED, &adapter->state);
 	}
-
-	return 0;
 }
 
 static void ixgbevf_configure(struct ixgbevf_adapter *adapter)
@@ -2464,6 +2448,60 @@ static int ixgbevf_acquire_msix_vectors(struct ixgbevf_adapter *adapter,
 	return 0;
 }
 
+static void ixgbevf_cfg_queue_caps(struct ixgbevf_adapter *adapter)
+{
+	struct ixgbe_hw *hw = &adapter->hw;
+	u32 max_qpairs, rss;
+	int err;
+
+	adapter->q_caps = (typeof(adapter->q_caps)) {
+		.min_rxqs = 1,
+		.min_txqs = 1,
+		.max_rxqs = 1,
+		.max_txqs = 1,
+	};
+
+	/* fetch queue configuration from the PF */
+	spin_lock_bh(&adapter->mbx_lock);
+	err = ixgbevf_get_queues(hw, &adapter->q_caps.num_tcs,
+				 &adapter->q_caps.def_tc);
+	spin_unlock_bh(&adapter->mbx_lock);
+	if (err)
+		return;
+
+	/* we need as many queues as traffic classes */
+	if (adapter->q_caps.num_tcs > 1) {
+		adapter->q_caps.min_rxqs = adapter->q_caps.num_tcs;
+		adapter->q_caps.max_rxqs = adapter->q_caps.num_tcs;
+		return;
+	}
+
+	switch (hw->api_version) {
+	case ixgbe_mbox_api_11:
+	case ixgbe_mbox_api_12:
+	case ixgbe_mbox_api_13:
+	case ixgbe_mbox_api_14:
+	case ixgbe_mbox_api_15:
+	case ixgbe_mbox_api_16:
+	case ixgbe_mbox_api_17:
+		max_qpairs = min_t(u32, hw->mac.max_rx_queues,
+				        hw->mac.max_tx_queues);
+		if (adapter->xdp_prog)
+			max_qpairs = min_t(u32, max_qpairs,
+					   hw->mac.max_tx_queues / 2);
+		break;
+	default:
+		max_qpairs = adapter->xdp_prog ? IXGBEVF_MAX_RSS_QUEUES / 2 :
+						 IXGBEVF_MAX_RSS_QUEUES;
+		break;
+	}
+
+	rss = min_t(u32, max_qpairs, num_online_cpus());
+
+	adapter->q_caps.max_rxqs = rss;
+	adapter->q_caps.max_txqs = rss;
+}
+
 /**
  * ixgbevf_set_num_queues - Allocate queues for device, feature dependent
  * @adapter: board private structure to initialize
@@ -2477,51 +2515,26 @@ static int ixgbevf_acquire_msix_vectors(struct ixgbevf_adapter *adapter,
  **/
 static void ixgbevf_set_num_queues(struct ixgbevf_adapter *adapter)
 {
-	struct ixgbe_hw *hw = &adapter->hw;
-	unsigned int def_q = 0;
-	unsigned int num_tcs = 0;
-	int err;
+	ixgbevf_cfg_queue_caps(adapter);
 
-	/* Start with base case */
-	adapter->num_rx_queues = 1;
-	adapter->num_tx_queues = 1;
-	adapter->num_xdp_queues = 0;
+	if (adapter->q_caps.num_tcs > 1) {
+		adapter->num_rx_queues = adapter->q_caps.max_rxqs;
+		adapter->num_tx_queues = adapter->q_caps.max_txqs;
+		adapter->num_xdp_queues = 0;
 
-	spin_lock_bh(&adapter->mbx_lock);
-
-	/* fetch queue configuration from the PF */
-	err = ixgbevf_get_queues(hw, &num_tcs, &def_q);
-
-	spin_unlock_bh(&adapter->mbx_lock);
-
-	if (err)
 		return;
-
-	/* we need as many queues as traffic classes */
-	if (num_tcs > 1) {
-		adapter->num_rx_queues = num_tcs;
 	} else {
-		u16 rss = min_t(u16, num_online_cpus(), IXGBEVF_MAX_RSS_QUEUES);
+		u32 max_qpairs = min_t(u32, adapter->q_caps.max_rxqs,
+					    adapter->q_caps.max_txqs);
 
-		switch (hw->api_version) {
-		case ixgbe_mbox_api_11:
-		case ixgbe_mbox_api_12:
-		case ixgbe_mbox_api_13:
-		case ixgbe_mbox_api_14:
-		case ixgbe_mbox_api_15:
-		case ixgbe_mbox_api_16:
-		case ixgbe_mbox_api_17:
-			if (adapter->xdp_prog &&
-			    hw->mac.max_tx_queues == rss)
-				rss = rss > 3 ? 2 : 1;
-
-			adapter->num_rx_queues = rss;
-			adapter->num_tx_queues = rss;
-			adapter->num_xdp_queues = adapter->xdp_prog ? rss : 0;
-			break;
-		default:
-			break;
-		}
+		adapter->num_req_qpairs =
+			adapter->num_req_qpairs ? : adapter->q_caps.max_rxqs;
+		WARN_ON_ONCE(adapter->num_req_qpairs > max_qpairs);
+		adapter->num_rx_queues =
+			min_t(u32, adapter->num_req_qpairs, max_qpairs);
+		adapter->num_tx_queues = adapter->num_rx_queues;
+		adapter->num_xdp_queues = adapter->xdp_prog ?
+					  adapter->num_rx_queues : 0;
 	}
 }
 
@@ -2832,7 +2845,7 @@ static void ixgbevf_reset_interrupt_capability(struct ixgbevf_adapter *adapter)
  * @adapter: board private structure to initialize
  *
  **/
-static int ixgbevf_init_interrupt_scheme(struct ixgbevf_adapter *adapter)
+int ixgbevf_init_interrupt_scheme(struct ixgbevf_adapter *adapter)
 {
 	int err;
 
@@ -2873,7 +2886,7 @@ err_set_interrupt:
  * We go through and clear interrupt specific resources and reset the structure
  * to pre-load conditions
  **/
-static void ixgbevf_clear_interrupt_scheme(struct ixgbevf_adapter *adapter)
+void ixgbevf_clear_interrupt_scheme(struct ixgbevf_adapter *adapter)
 {
 	adapter->num_tx_queues = 0;
 	adapter->num_xdp_queues = 0;
@@ -4316,6 +4329,13 @@ static int ixgbevf_xdp_setup(struct net_device *dev, struct bpf_prog *prog,
 		NL_SET_ERR_MSG_MOD(extack,
 				   "Configured MTU or HW limitations require non-linear frames and XDP prog does not support frags");
 		return -EOPNOTSUPP;
+	}
+
+	if (!adapter->xdp_prog && prog &&
+	    adapter->num_req_qpairs * 2 > adapter->q_caps.max_txqs) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Number of configured queue pairs should be half of the maximum or less to configure XDP");
+		return -EINVAL;
 	}
 
 	old_prog = xchg(&adapter->xdp_prog, prog);
