@@ -270,6 +270,15 @@ static inline void ixgbevf_write_tail(struct ixgbevf_ring *ring, u32 value)
 #define IXGBEVF_RX_DMA_ATTR \
 	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
 
+struct ixgbevf_q_caps {
+	u32 min_rxqs;
+	u32 max_rxqs;
+	u32 min_txqs;
+	u32 max_txqs;
+	u32 num_tcs;
+	u32 def_tc;
+};
+
 /* board specific private data structure */
 struct ixgbevf_adapter {
 	/* this field must be first, see ixgbevf_process_skb_fields */
@@ -346,6 +355,8 @@ struct ixgbevf_adapter {
 	u8 rss_indir_tbl[IXGBEVF_X550_VFRETA_SIZE];
 	u32 flags;
 	bool link_state;
+	struct ixgbevf_q_caps q_caps;
+	u32 num_req_qpairs;
 
 #ifdef CONFIG_XFRM
 	struct ixgbevf_ipsec *ipsec;
@@ -432,6 +443,8 @@ void ixgbevf_free_tx_resources(struct ixgbevf_ring *);
 void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring);
 void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring);
 void ixgbevf_update_stats(struct ixgbevf_adapter *adapter);
+int ixgbevf_init_interrupt_scheme(struct ixgbevf_adapter *adapter);
+void ixgbevf_clear_interrupt_scheme(struct ixgbevf_adapter *adapter);
 int ethtool_ioctl(struct ifreq *ifr);
 
 extern void ixgbevf_write_eitr(struct ixgbevf_q_vector *q_vector);
