@@ -132,11 +132,9 @@ static const char ixgbe_gstrings_test[][ETH_GSTRING_LEN] = {
 #define IXGBE_TEST_LEN sizeof(ixgbe_gstrings_test) / ETH_GSTRING_LEN
 
 static const char ixgbe_priv_flags_strings[][ETH_GSTRING_LEN] = {
-#define IXGBE_PRIV_FLAGS_LEGACY_RX	BIT(0)
-	"legacy-rx",
-#define IXGBE_PRIV_FLAGS_VF_IPSEC_EN	BIT(1)
+#define IXGBE_PRIV_FLAGS_VF_IPSEC_EN	BIT(0)
 	"vf-ipsec",
-#define IXGBE_PRIV_FLAGS_AUTO_DISABLE_VF	BIT(2)
+#define IXGBE_PRIV_FLAGS_AUTO_DISABLE_VF	BIT(1)
 	"mdd-disable-vf",
 };
 
@@ -3667,9 +3665,6 @@ static u32 ixgbe_get_priv_flags(struct net_device *netdev)
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 	u32 priv_flags = 0;
 
-	if (adapter->flags2 & IXGBE_FLAG2_RX_LEGACY)
-		priv_flags |= IXGBE_PRIV_FLAGS_LEGACY_RX;
-
 	if (adapter->flags2 & IXGBE_FLAG2_VF_IPSEC_ENABLED)
 		priv_flags |= IXGBE_PRIV_FLAGS_VF_IPSEC_EN;
 
@@ -3684,10 +3679,6 @@ static int ixgbe_set_priv_flags(struct net_device *netdev, u32 priv_flags)
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 	unsigned int flags2 = adapter->flags2;
 	unsigned int i;
-
-	flags2 &= ~IXGBE_FLAG2_RX_LEGACY;
-	if (priv_flags & IXGBE_PRIV_FLAGS_LEGACY_RX)
-		flags2 |= IXGBE_FLAG2_RX_LEGACY;
 
 	flags2 &= ~IXGBE_FLAG2_VF_IPSEC_ENABLED;
 	if (priv_flags & IXGBE_PRIV_FLAGS_VF_IPSEC_EN)

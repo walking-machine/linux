@@ -129,14 +129,7 @@ static inline int ixgbe_skb_pad(void)
 #define IXGBE_SKB_PAD	(NET_SKB_PAD + NET_IP_ALIGN)
 #endif
 
-/*
- * NOTE: netdev_alloc_skb reserves up to 64 bytes, NET_IP_ALIGN means we
- * reserve 64 more, and skb_shared_info adds an additional 320 bytes more,
- * this adds up to 448 bytes of extra data.
- *
- * Since netdev_alloc_skb now allocates a page fragment we can use a value
- * of 256 and the resultant skb will have a truesize of 960 or less.
- */
+/* Default HW header buffer size */
 #define IXGBE_RX_HDR_SIZE IXGBE_RXBUFFER_256
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
@@ -312,7 +305,6 @@ struct ixgbe_rx_queue_stats {
 
 enum ixgbe_ring_state_t {
 	__IXGBE_RX_3K_BUFFER,
-	__IXGBE_RX_BUILD_SKB_ENABLED,
 	__IXGBE_RX_RSC_ENABLED,
 	__IXGBE_RX_CSUM_UDP_ZERO_ERR,
 	__IXGBE_RX_FCOE,
@@ -323,9 +315,6 @@ enum ixgbe_ring_state_t {
 	__IXGBE_TX_XDP_RING,
 	__IXGBE_TX_DISABLED,
 };
-
-#define ring_uses_build_skb(ring) \
-	test_bit(__IXGBE_RX_BUILD_SKB_ENABLED, &(ring)->state)
 
 struct ixgbe_fwd_adapter {
 	unsigned long active_vlans[BITS_TO_LONGS(VLAN_N_VID)];
@@ -397,7 +386,6 @@ struct ixgbe_ring {
 		struct ixgbe_tx_queue_stats tx_stats;
 		struct ixgbe_rx_queue_stats rx_stats;
 	};
-	u16 rx_offset;
 	struct xdp_rxq_info xdp_rxq;
 	spinlock_t tx_lock;	/* used in XDP mode */
 	struct xsk_buff_pool *xsk_pool;
@@ -456,8 +444,7 @@ static inline unsigned int ixgbe_rx_bufsz(struct ixgbe_ring *ring)
 	if (test_bit(__IXGBE_RX_3K_BUFFER, &ring->state))
 		return IXGBE_RXBUFFER_3K;
 #if (PAGE_SIZE < 8192)
-	if (ring_uses_build_skb(ring))
-		return IXGBE_MAX_2K_FRAME_BUILD_SKB;
+	return IXGBE_MAX_2K_FRAME_BUILD_SKB;
 #endif
 	return IXGBE_RXBUFFER_2K;
 }
@@ -471,6 +458,11 @@ static inline unsigned int ixgbe_rx_pg_order(struct ixgbe_ring *ring)
 	return 0;
 }
 #define ixgbe_rx_pg_size(_ring) (PAGE_SIZE << ixgbe_rx_pg_order(_ring))
+
+static inline unsigned int ixgbe_rx_offset(struct ixgbe_ring *rx_ring)
+{
+	return IXGBE_SKB_PAD;
+}
 
 #define IXGBE_ITR_ADAPTIVE_MIN_INC	2
 #define IXGBE_ITR_ADAPTIVE_MIN_USECS	10
@@ -672,7 +664,7 @@ struct ixgbe_adapter {
 #define IXGBE_FLAG2_VLAN_PROMISC		BIT(13)
 #define IXGBE_FLAG2_EEE_CAPABLE			BIT(14)
 #define IXGBE_FLAG2_EEE_ENABLED			BIT(15)
-#define IXGBE_FLAG2_RX_LEGACY			BIT(16)
+/* BIT16 used to be reserved for legacy RX flag */
 #define IXGBE_FLAG2_IPSEC_ENABLED		BIT(17)
 #define IXGBE_FLAG2_VF_IPSEC_ENABLED		BIT(18)
 #define IXGBE_FLAG2_AUTO_DISABLE_VF		BIT(19)
