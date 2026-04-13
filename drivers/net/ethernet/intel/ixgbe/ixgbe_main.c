@@ -1730,19 +1730,14 @@ static inline void ixgbe_rx_checksum(struct ixgbe_ring *ring,
 	}
 }
 
-static unsigned int ixgbe_rx_offset(struct ixgbe_ring *rx_ring)
-{
-	return ring_uses_build_skb(rx_ring) ? IXGBE_SKB_PAD : 0;
-}
-
 static bool ixgbe_alloc_mapped_page(struct ixgbe_ring *rx_ring,
 				    struct ixgbe_rx_buffer *bi)
 {
-	struct page *page = bi->page;
+	struct page *page;
 	dma_addr_t dma;
 
 	/* since we are recycling buffers we should seldom need to alloc */
-	if (likely(page))
+	if (likely(bi->page))
 		return true;
 
 	/* alloc new page for storage */
@@ -2034,24 +2029,12 @@ static void ixgbe_pull_tail(struct ixgbe_ring *rx_ring,
 static void ixgbe_dma_sync_frag(struct ixgbe_ring *rx_ring,
 				struct sk_buff *skb)
 {
-	if (ring_uses_build_skb(rx_ring)) {
-		unsigned long mask = (unsigned long)ixgbe_rx_pg_size(rx_ring) - 1;
-		unsigned long offset = (unsigned long)(skb->data) & mask;
+	unsigned long mask = (unsigned long)ixgbe_rx_pg_size(rx_ring) - 1;
+	unsigned long offset = (unsigned long)(skb->data) & mask;
 
-		dma_sync_single_range_for_cpu(rx_ring->dev,
-					      IXGBE_CB(skb)->dma,
-					      offset,
-					      skb_headlen(skb),
-					      DMA_FROM_DEVICE);
-	} else {
-		skb_frag_t *frag = &skb_shinfo(skb)->frags[0];
-
-		dma_sync_single_range_for_cpu(rx_ring->dev,
-					      IXGBE_CB(skb)->dma,
-					      skb_frag_off(frag),
-					      skb_frag_size(frag),
-					      DMA_FROM_DEVICE);
-	}
+	dma_sync_single_range_for_cpu(rx_ring->dev, IXGBE_CB(skb)->dma,
+				      offset, skb_headlen(skb),
+				      DMA_FROM_DEVICE);
 
 	/* If the page was released, just unmap it. */
 	if (unlikely(IXGBE_CB(skb)->page_released)) {
@@ -2192,13 +2175,9 @@ static bool ixgbe_can_reuse_rx_page(struct ixgbe_rx_buffer *rx_buffer,
  * @skb: sk_buff to place the data into
  * @size: size of data in rx_buffer
  *
- * This function will add the data contained in rx_buffer->page to the skb.
- * This is done either through a direct copy if the data in the buffer is
- * less than the skb header size, otherwise it will just attach the page as
- * a frag to the skb.
- *
- * The function will then update the page offset if necessary and return
- * true if the buffer can be reused by the adapter.
+ * This function attaches the page contained in rx_buffer to the skb as
+ * a fragment. It then updates the page offset based on the configured
+ * PAGE_SIZE to prepare the buffer for the next packet.
  **/
 static void ixgbe_add_rx_frag(struct ixgbe_ring *rx_ring,
 			      struct ixgbe_rx_buffer *rx_buffer,
@@ -2208,9 +2187,7 @@ static void ixgbe_add_rx_frag(struct ixgbe_ring *rx_ring,
 #if (PAGE_SIZE < 8192)
 	unsigned int truesize = ixgbe_rx_pg_size(rx_ring) / 2;
 #else
-	unsigned int truesize = rx_ring->rx_offset ?
-				SKB_DATA_ALIGN(rx_ring->rx_offset + size) :
-				SKB_DATA_ALIGN(size);
+	unsigned int truesize = SKB_DATA_ALIGN(IXGBE_SKB_PAD + size);
 #endif
 	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, rx_buffer->page,
 			rx_buffer->page_offset, size, truesize);
@@ -2289,65 +2266,6 @@ static void ixgbe_put_rx_buffer(struct ixgbe_ring *rx_ring,
 	/* clear contents of rx_buffer */
 	rx_buffer->page = NULL;
 	rx_buffer->skb = NULL;
-}
-
-static struct sk_buff *ixgbe_construct_skb(struct ixgbe_ring *rx_ring,
-					   struct ixgbe_rx_buffer *rx_buffer,
-					   struct xdp_buff *xdp,
-					   union ixgbe_adv_rx_desc *rx_desc)
-{
-	unsigned int size = xdp->data_end - xdp->data;
-#if (PAGE_SIZE < 8192)
-	unsigned int truesize = ixgbe_rx_pg_size(rx_ring) / 2;
-#else
-	unsigned int truesize = SKB_DATA_ALIGN(xdp->data_end -
-					       xdp->data_hard_start);
-#endif
-	struct sk_buff *skb;
-
-	/* prefetch first cache line of first page */
-	net_prefetch(xdp->data);
-
-	/* Note, we get here by enabling legacy-rx via:
-	 *
-	 *    ethtool --set-priv-flags <dev> legacy-rx on
-	 *
-	 * In this mode, we currently get 0 extra XDP headroom as
-	 * opposed to having legacy-rx off, where we process XDP
-	 * packets going to stack via ixgbe_build_skb(). The latter
-	 * provides us currently with 192 bytes of headroom.
-	 *
-	 * For ixgbe_construct_skb() mode it means that the
-	 * xdp->data_meta will always point to xdp->data, since
-	 * the helper cannot expand the head. Should this ever
-	 * change in future for legacy-rx mode on, then lets also
-	 * add xdp->data_meta handling here.
-	 */
-
-	/* allocate a skb to store the frags */
-	skb = napi_alloc_skb(&rx_ring->q_vector->napi, IXGBE_RX_HDR_SIZE);
-	if (unlikely(!skb))
-		return NULL;
-
-	if (size > IXGBE_RX_HDR_SIZE) {
-		if (!ixgbe_test_staterr(rx_desc, IXGBE_RXD_STAT_EOP))
-			IXGBE_CB(skb)->dma = rx_buffer->dma;
-
-		skb_add_rx_frag(skb, 0, rx_buffer->page,
-				xdp->data - page_address(rx_buffer->page),
-				size, truesize);
-#if (PAGE_SIZE < 8192)
-		rx_buffer->page_offset ^= truesize;
-#else
-		rx_buffer->page_offset += truesize;
-#endif
-	} else {
-		memcpy(__skb_put(skb, size),
-		       xdp->data, ALIGN(size, sizeof(long)));
-		rx_buffer->pagecnt_bias++;
-	}
-
-	return skb;
 }
 
 static struct sk_buff *ixgbe_build_skb(struct ixgbe_ring *rx_ring,
@@ -2460,10 +2378,8 @@ static unsigned int ixgbe_rx_frame_truesize(struct ixgbe_ring *rx_ring,
 #if (PAGE_SIZE < 8192)
 	truesize = ixgbe_rx_pg_size(rx_ring) / 2; /* Must be power-of-2 */
 #else
-	truesize = rx_ring->rx_offset ?
-		SKB_DATA_ALIGN(rx_ring->rx_offset + size) +
-		SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) :
-		SKB_DATA_ALIGN(size);
+	truesize = SKB_DATA_ALIGN(IXGBE_SKB_PAD + size) +
+		   SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 #endif
 	return truesize;
 }
@@ -2504,7 +2420,6 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 	unsigned int mss = 0;
 #endif /* IXGBE_FCOE */
 	u16 cleaned_count = ixgbe_desc_unused(rx_ring);
-	unsigned int offset = rx_ring->rx_offset;
 	unsigned int xdp_xmit = 0;
 	struct xdp_buff xdp;
 	int xdp_res = 0;
@@ -2543,6 +2458,7 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 
 		/* retrieve a buffer from the ring */
 		if (!skb) {
+			unsigned int offset = rx_ring->rx_offset;
 			unsigned char *hard_start;
 
 			hard_start = page_address(rx_buffer->page) +
@@ -2567,12 +2483,9 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 			total_rx_bytes += size;
 		} else if (skb) {
 			ixgbe_add_rx_frag(rx_ring, rx_buffer, skb, size);
-		} else if (ring_uses_build_skb(rx_ring)) {
+		} else {
 			skb = ixgbe_build_skb(rx_ring, rx_buffer,
 					      &xdp, rx_desc);
-		} else {
-			skb = ixgbe_construct_skb(rx_ring, rx_buffer,
-						  &xdp, rx_desc);
 		}
 
 		/* exit if we failed to retrieve a buffer */
@@ -4557,14 +4470,13 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 		 * This can happen in SRIOV mode when the MTU of the VF is
 		 * higher than the MTU of the PF.
 		 */
-		if (ring_uses_build_skb(ring) &&
-		    !test_bit(__IXGBE_RX_3K_BUFFER, &ring->state))
+		if (!test_bit(__IXGBE_RX_3K_BUFFER, &ring->state))
 			rxdctl |= IXGBE_MAX_2K_FRAME_BUILD_SKB |
 				  IXGBE_RXDCTL_RLPML_EN;
 #endif
 	}
 
-	ring->rx_offset = ixgbe_rx_offset(ring);
+	ring->rx_offset = IXGBE_SKB_PAD;
 
 	if (ring->xsk_pool && hw->mac.type != ixgbe_mac_82599EB) {
 		u32 xsk_buf_len = xsk_pool_get_rx_frame_size(ring->xsk_pool);
@@ -4734,18 +4646,12 @@ static void ixgbe_set_rx_buffer_len(struct ixgbe_adapter *adapter)
 
 		clear_ring_rsc_enabled(rx_ring);
 		clear_bit(__IXGBE_RX_3K_BUFFER, &rx_ring->state);
-		clear_bit(__IXGBE_RX_BUILD_SKB_ENABLED, &rx_ring->state);
 
 		if (adapter->flags2 & IXGBE_FLAG2_RSC_ENABLED)
 			set_ring_rsc_enabled(rx_ring);
 
 		if (test_bit(__IXGBE_RX_FCOE, &rx_ring->state))
 			set_bit(__IXGBE_RX_3K_BUFFER, &rx_ring->state);
-
-		if (adapter->flags2 & IXGBE_FLAG2_RX_LEGACY)
-			continue;
-
-		set_bit(__IXGBE_RX_BUILD_SKB_ENABLED, &rx_ring->state);
 
 #if (PAGE_SIZE < 8192)
 		if (adapter->flags2 & IXGBE_FLAG2_RSC_ENABLED)
@@ -7199,7 +7105,7 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 			     rx_ring->queue_index, ixgbe_rx_napi_id(rx_ring)) < 0)
 		goto err;
 
-	WRITE_ONCE(rx_ring->xdp_prog, adapter->xdp_prog);
+	rcu_assign_pointer(rx_ring->xdp_prog, adapter->xdp_prog);
 
 	return 0;
 err:
@@ -7335,7 +7241,7 @@ static void ixgbe_free_all_rx_resources(struct ixgbe_adapter *adapter)
  */
 static int ixgbe_max_xdp_frame_size(struct ixgbe_adapter *adapter)
 {
-	if (PAGE_SIZE >= 8192 || adapter->flags2 & IXGBE_FLAG2_RX_LEGACY)
+	if (PAGE_SIZE >= 8192)
 		return IXGBE_RXBUFFER_2K;
 	else
 		return IXGBE_RXBUFFER_3K;
