@@ -5,7 +5,7 @@
 #define _IXD_LAN_REGS_H_
 
 /* Control Plane Function PCI ID */
-#define IXD_DEV_ID_CPF			0x1efe
+#define IXD_DEV_ID_CPF			0x1453
 
 /* Control Queue (Mailbox) */
 #define PF_FW_MBX_REG_LEN		4096
