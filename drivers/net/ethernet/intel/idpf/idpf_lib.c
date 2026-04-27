@@ -1603,13 +1603,13 @@ static int idpf_vport_open(struct idpf_vport *vport, bool rtnl)
 
 	idpf_restore_features(vport);
 
-	rss_data = &vport_config->user_config.rss_data;
-	err = idpf_config_rss(vport, rss_data);
-	if (err) {
-		dev_err(&adapter->pdev->dev, "Failed to configure RSS for vport %u: %d\n",
-			vport->vport_id, err);
-		goto disable_vport;
-	}
+	// rss_data = &vport_config->user_config.rss_data;
+	// err = idpf_config_rss(vport, rss_data);
+	// if (err) {
+	// 	dev_err(&adapter->pdev->dev, "Failed to configure RSS for vport %u: %d\n",
+	// 		vport->vport_id, err);
+	// 	goto disable_vport;
+	// }
 
 	idpf_up_complete(vport);
 
