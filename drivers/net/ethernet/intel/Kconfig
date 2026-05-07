@@ -146,6 +146,7 @@ config IXGBE
 	tristate "Intel(R) 10GbE PCI Express adapters support"
 	depends on PCI
 	depends on PTP_1588_CLOCK_OPTIONAL
+	select LIBETH_XDP
 	select LIBIE_FWLOG if DEBUG_FS
 	select MDIO
 	select NET_DEVLINK

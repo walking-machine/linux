@@ -151,7 +151,7 @@ out_failure:
 bool ixgbe_alloc_rx_buffers_zc(struct ixgbe_ring *rx_ring, u16 count)
 {
 	union ixgbe_adv_rx_desc *rx_desc;
-	struct ixgbe_rx_buffer *bi;
+	struct ixgbe_xsk_rx_buffer *bi;
 	u16 i = rx_ring->next_to_use;
 	dma_addr_t dma;
 	bool ok = true;
@@ -161,7 +161,7 @@ bool ixgbe_alloc_rx_buffers_zc(struct ixgbe_ring *rx_ring, u16 count)
 		return true;
 
 	rx_desc = IXGBE_RX_DESC(rx_ring, i);
-	bi = &rx_ring->rx_buffer_info[i];
+	bi = &rx_ring->rx_xsk_buffer_info[i];
 	i -= rx_ring->count;
 
 	do {
@@ -183,7 +183,7 @@ bool ixgbe_alloc_rx_buffers_zc(struct ixgbe_ring *rx_ring, u16 count)
 		i++;
 		if (unlikely(!i)) {
 			rx_desc = IXGBE_RX_DESC(rx_ring, 0);
-			bi = rx_ring->rx_buffer_info;
+			bi = rx_ring->rx_xsk_buffer_info;
 			i -= rx_ring->count;
 		}
 
@@ -257,7 +257,7 @@ int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
 
 	while (likely(total_rx_packets < budget)) {
 		union ixgbe_adv_rx_desc *rx_desc;
-		struct ixgbe_rx_buffer *bi;
+		struct ixgbe_xsk_rx_buffer *bi;
 		unsigned int size;
 
 		/* return some buffers to hardware, one at a time is too slow */
@@ -279,17 +279,17 @@ int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
 		 */
 		dma_rmb();
 
-		bi = &rx_ring->rx_buffer_info[rx_ring->next_to_clean];
+		bi = &rx_ring->rx_xsk_buffer_info[rx_ring->next_to_clean];
 
 		if (unlikely(!ixgbe_test_staterr(rx_desc,
 						 IXGBE_RXD_STAT_EOP))) {
-			struct ixgbe_rx_buffer *next_bi;
+			struct ixgbe_xsk_rx_buffer *next_bi;
 
 			xsk_buff_free(bi->xdp);
 			bi->xdp = NULL;
 			ixgbe_inc_ntc(rx_ring);
 			next_bi =
-			       &rx_ring->rx_buffer_info[rx_ring->next_to_clean];
+			       &rx_ring->rx_xsk_buffer_info[rx_ring->next_to_clean];
 			next_bi->discard = true;
 			continue;
 		}
@@ -345,6 +345,7 @@ construct_skb:
 		total_rx_bytes += skb->len;
 		total_rx_packets++;
 
+		skb->protocol = eth_type_trans(skb, rx_ring->netdev);
 		ixgbe_process_skb_fields(rx_ring, rx_desc, skb);
 		ixgbe_rx_skb(q_vector, skb);
 	}
@@ -374,11 +375,11 @@ construct_skb:
 
 void ixgbe_xsk_clean_rx_ring(struct ixgbe_ring *rx_ring)
 {
-	struct ixgbe_rx_buffer *bi;
+	struct ixgbe_xsk_rx_buffer *bi;
 	u16 i;
 
 	for (i = 0; i < rx_ring->count; i++) {
-		bi = &rx_ring->rx_buffer_info[i];
+		bi = &rx_ring->rx_xsk_buffer_info[i];
 
 		if (!bi->xdp)
 			continue;
