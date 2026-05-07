@@ -1949,7 +1949,6 @@ static int ixgbe_setup_desc_rings(struct ixgbe_adapter *adapter)
 	/* Setup Rx Descriptor ring and Rx buffers */
 	rx_ring->count = IXGBE_DEFAULT_RXD;
 	rx_ring->queue_index = 0;
-	rx_ring->dev = &adapter->pdev->dev;
 	rx_ring->netdev = adapter->netdev;
 	rx_ring->reg_idx = adapter->rx_ring[0]->reg_idx;
 
@@ -2060,14 +2059,16 @@ static void ixgbe_create_lbtest_frame(struct sk_buff *skb,
 	skb->data[frame_size + 12] = 0xAF;
 }
 
-static bool ixgbe_check_lbtest_frame(struct ixgbe_rx_buffer *rx_buffer,
+static bool ixgbe_check_lbtest_frame(const struct libeth_fqe *rx_buffer,
 				     unsigned int frame_size)
 {
+	u32 hr = netmem_get_pp(rx_buffer->netmem)->p.offset;
 	unsigned char *data;
 
 	frame_size >>= 1;
 
-	data = page_address(rx_buffer->page) + rx_buffer->page_offset;
+	data = page_address(__netmem_to_page(rx_buffer->netmem)) +
+	       rx_buffer->offset + hr;
 
 	return data[3] == 0xFF && data[frame_size + 10] == 0xBE &&
 		data[frame_size + 12] == 0xAF;
@@ -2115,16 +2116,13 @@ static u16 ixgbe_clean_test_rings(struct ixgbe_ring *rx_ring,
 	}
 
 	while (rx_desc->wb.upper.length) {
-		struct ixgbe_rx_buffer *rx_buffer;
+		struct libeth_fqe *rx_buffer;
 
 		/* check Rx buffer */
-		rx_buffer = &rx_ring->rx_buffer_info[rx_ntc];
+		rx_buffer = &rx_ring->rx_fqes[rx_ntc];
 
 		/* sync Rx buffer for CPU read */
-		dma_sync_single_for_cpu(rx_ring->dev,
-					rx_buffer->dma,
-					IXGBE_RXBUFFER_3K,
-					DMA_FROM_DEVICE);
+		libeth_rx_sync_for_cpu(rx_buffer, rx_ring->rx_buf_len);
 
 		/* verify contents of skb */
 		if (ixgbe_check_lbtest_frame(rx_buffer, size))
@@ -2132,11 +2130,8 @@ static u16 ixgbe_clean_test_rings(struct ixgbe_ring *rx_ring,
 		else
 			break;
 
-		/* sync Rx buffer for device write */
-		dma_sync_single_for_device(rx_ring->dev,
-					   rx_buffer->dma,
-					   IXGBE_RXBUFFER_3K,
-					   DMA_FROM_DEVICE);
+		/* recycle the page back to the pool */
+		libeth_rx_recycle_slow(rx_buffer->netmem);
 
 		/* increment Rx next to clean counter */
 		rx_ntc++;

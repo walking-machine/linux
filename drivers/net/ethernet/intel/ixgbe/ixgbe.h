@@ -33,6 +33,7 @@
 #include "ixgbe_ipsec.h"
 
 #include <net/xdp.h>
+#include <net/libeth/rx.h>
 
 /* common prefix used by pr_<> macros */
 #undef pr_fmt
@@ -73,9 +74,8 @@
 #define IXGBE_RXBUFFER_4K    4096
 #define IXGBE_MAX_RXBUFFER  16384  /* largest size for a single descriptor */
 
-#define IXGBE_PKT_HDR_PAD   (ETH_HLEN + ETH_FCS_LEN + (VLAN_HLEN * 2))
-
-#define IXGBE_SKB_PAD	(NET_SKB_PAD + NET_IP_ALIGN)
+#define IXGBE_RX_PAGE_LEN(hr)		(ALIGN_DOWN(LIBETH_RX_PAGE_LEN(hr), \
+					 IXGBE_SRRCTL_BSIZEPKT_STEP))
 
 /* Default HW header buffer size */
 #define IXGBE_RX_HDR_SIZE IXGBE_RXBUFFER_256
@@ -212,18 +212,9 @@ struct ixgbe_tx_buffer {
 	u32 tx_flags;
 };
 
-struct ixgbe_rx_buffer {
-	union {
-		struct {
-			dma_addr_t dma;
-			struct page *page;
-			__u32 page_offset;
-		};
-		struct {
-			bool discard;
-			struct xdp_buff *xdp;
-		};
-	};
+struct ixgbe_xsk_rx_buffer {
+	bool discard;
+	struct xdp_buff *xdp;
 };
 
 struct ixgbe_queue_stats {
@@ -291,17 +282,22 @@ struct ixgbe_ring {
 	struct ixgbe_ring *next;	/* pointer to next ring in q_vector */
 	struct ixgbe_q_vector *q_vector; /* backpointer to host q_vector */
 	struct net_device *netdev;	/* netdev ring belongs to */
-	struct bpf_prog *xdp_prog;
-	struct device *dev;		/* device for DMA mapping */
+	struct bpf_prog __rcu *xdp_prog;
+	union {
+		struct page_pool *pp;	/* Rx ring */
+		struct device *dev;	/* Tx ring */
+	};
 	void *desc;			/* descriptor ring memory */
 	union {
+		struct libeth_fqe *rx_fqes;
+		struct ixgbe_xsk_rx_buffer *rx_xsk_buffer_info;
 		struct ixgbe_tx_buffer *tx_buffer_info;
-		struct ixgbe_rx_buffer *rx_buffer_info;
 	};
 	unsigned long state;
 	u8 __iomem *tail;
 	dma_addr_t dma;			/* phys. address of descriptor ring */
 	unsigned int size;		/* length in bytes */
+	u32 truesize;
 
 	u16 count;			/* amount of descriptors */
 
@@ -333,7 +329,7 @@ struct ixgbe_ring {
 	spinlock_t tx_lock;	/* used in XDP mode */
 	struct xsk_buff_pool *xsk_pool;
 	u16 ring_idx;		/* {rx,tx,xdp}_ring back reference idx */
-	u16 rx_buf_len;
+	u32 rx_buf_len;
 } ____cacheline_internodealigned_in_smp;
 
 enum ixgbe_ring_f_enum {
@@ -376,11 +372,6 @@ struct ixgbe_ring_feature {
 #define IXGBE_82599_VMDQ_8Q_MASK 0x78
 #define IXGBE_82599_VMDQ_4Q_MASK 0x7C
 #define IXGBE_82599_VMDQ_2Q_MASK 0x7E
-
-static inline unsigned int ixgbe_rx_offset(struct ixgbe_ring *rx_ring)
-{
-	return IXGBE_SKB_PAD;
-}
 
 #define IXGBE_ITR_ADAPTIVE_MIN_INC	2
 #define IXGBE_ITR_ADAPTIVE_MIN_USECS	10
