@@ -1961,6 +1961,10 @@ static int ixgbe_setup_desc_rings(struct ixgbe_adapter *adapter)
 
 	hw->mac.ops.disable_rx(hw);
 
+	clear_ring_rsc_enabled(rx_ring);
+	if (adapter->flags2 & IXGBE_FLAG2_RSC_ENABLED)
+		set_ring_rsc_enabled(rx_ring);
+
 	ixgbe_configure_rx_ring(adapter, rx_ring);
 
 	rctl = IXGBE_READ_REG(&adapter->hw, IXGBE_RXCTRL);
@@ -2119,7 +2123,7 @@ static u16 ixgbe_clean_test_rings(struct ixgbe_ring *rx_ring,
 		/* sync Rx buffer for CPU read */
 		dma_sync_single_for_cpu(rx_ring->dev,
 					rx_buffer->dma,
-					ixgbe_rx_bufsz(rx_ring),
+					IXGBE_RXBUFFER_3K,
 					DMA_FROM_DEVICE);
 
 		/* verify contents of skb */
@@ -2131,7 +2135,7 @@ static u16 ixgbe_clean_test_rings(struct ixgbe_ring *rx_ring,
 		/* sync Rx buffer for device write */
 		dma_sync_single_for_device(rx_ring->dev,
 					   rx_buffer->dma,
-					   ixgbe_rx_bufsz(rx_ring),
+					   IXGBE_RXBUFFER_3K,
 					   DMA_FROM_DEVICE);
 
 		/* increment Rx next to clean counter */
