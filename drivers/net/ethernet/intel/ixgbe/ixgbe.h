@@ -69,65 +69,13 @@
 
 /* Supported Rx Buffer Sizes */
 #define IXGBE_RXBUFFER_256    256  /* Used for skb receive header */
-#define IXGBE_RXBUFFER_1536  1536
-#define IXGBE_RXBUFFER_2K    2048
 #define IXGBE_RXBUFFER_3K    3072
 #define IXGBE_RXBUFFER_4K    4096
 #define IXGBE_MAX_RXBUFFER  16384  /* largest size for a single descriptor */
 
 #define IXGBE_PKT_HDR_PAD   (ETH_HLEN + ETH_FCS_LEN + (VLAN_HLEN * 2))
 
-/* Attempt to maximize the headroom available for incoming frames.  We
- * use a 2K buffer for receives and need 1536/1534 to store the data for
- * the frame.  This leaves us with 512 bytes of room.  From that we need
- * to deduct the space needed for the shared info and the padding needed
- * to IP align the frame.
- *
- * Note: For cache line sizes 256 or larger this value is going to end
- *	 up negative.  In these cases we should fall back to the 3K
- *	 buffers.
- */
-#if (PAGE_SIZE < 8192)
-#define IXGBE_MAX_2K_FRAME_BUILD_SKB (IXGBE_RXBUFFER_1536 - NET_IP_ALIGN)
-#define IXGBE_2K_TOO_SMALL_WITH_PADDING \
-((NET_SKB_PAD + IXGBE_RXBUFFER_1536) > SKB_WITH_OVERHEAD(IXGBE_RXBUFFER_2K))
-
-static inline int ixgbe_compute_pad(int rx_buf_len)
-{
-	int page_size, pad_size;
-
-	page_size = ALIGN(rx_buf_len, PAGE_SIZE / 2);
-	pad_size = SKB_WITH_OVERHEAD(page_size) - rx_buf_len;
-
-	return pad_size;
-}
-
-static inline int ixgbe_skb_pad(void)
-{
-	int rx_buf_len;
-
-	/* If a 2K buffer cannot handle a standard Ethernet frame then
-	 * optimize padding for a 3K buffer instead of a 1.5K buffer.
-	 *
-	 * For a 3K buffer we need to add enough padding to allow for
-	 * tailroom due to NET_IP_ALIGN possibly shifting us out of
-	 * cache-line alignment.
-	 */
-	if (IXGBE_2K_TOO_SMALL_WITH_PADDING)
-		rx_buf_len = IXGBE_RXBUFFER_3K + SKB_DATA_ALIGN(NET_IP_ALIGN);
-	else
-		rx_buf_len = IXGBE_RXBUFFER_1536;
-
-	/* if needed make room for NET_IP_ALIGN */
-	rx_buf_len -= NET_IP_ALIGN;
-
-	return ixgbe_compute_pad(rx_buf_len);
-}
-
-#define IXGBE_SKB_PAD	ixgbe_skb_pad()
-#else
 #define IXGBE_SKB_PAD	(NET_SKB_PAD + NET_IP_ALIGN)
-#endif
 
 /*
  * RX header buffer size for page-based allocation using napi_build_skb.
@@ -270,11 +218,9 @@ struct ixgbe_tx_buffer {
 struct ixgbe_rx_buffer {
 	union {
 		struct {
-			struct sk_buff *skb;
 			dma_addr_t dma;
 			struct page *page;
 			__u32 page_offset;
-			__u16 pagecnt_bias;
 		};
 		struct {
 			bool discard;
@@ -307,7 +253,6 @@ struct ixgbe_rx_queue_stats {
 #define IXGBE_TS_HDR_LEN 8
 
 enum ixgbe_ring_state_t {
-	__IXGBE_RX_3K_BUFFER,
 	__IXGBE_RX_RSC_ENABLED,
 	__IXGBE_RX_CSUM_UDP_ZERO_ERR,
 	__IXGBE_RX_FCOE,
@@ -374,12 +319,9 @@ struct ixgbe_ring {
 
 	unsigned long last_rx_timestamp;
 
-	union {
-		u16 next_to_alloc;
-		struct {
-			u8 atr_sample_rate;
-			u8 atr_count;
-		};
+	struct {
+		u8 atr_sample_rate;
+		u8 atr_count;
 	};
 
 	u8 dcb_tc;
@@ -389,7 +331,7 @@ struct ixgbe_ring {
 		struct ixgbe_tx_queue_stats tx_stats;
 		struct ixgbe_rx_queue_stats rx_stats;
 	};
-	u16 rx_offset;
+	struct sk_buff *skb;		/* partial Rx skb across non-EOP */
 	struct xdp_rxq_info xdp_rxq;
 	spinlock_t tx_lock;	/* used in XDP mode */
 	struct xsk_buff_pool *xsk_pool;
@@ -438,30 +380,6 @@ struct ixgbe_ring_feature {
 #define IXGBE_82599_VMDQ_4Q_MASK 0x7C
 #define IXGBE_82599_VMDQ_2Q_MASK 0x7E
 
-/*
- * FCoE requires that all Rx buffers be over 2200 bytes in length.  Since
- * this is twice the size of a half page we need to double the page order
- * for FCoE enabled Rx queues.
- */
-static inline unsigned int ixgbe_rx_bufsz(struct ixgbe_ring *ring)
-{
-	if (test_bit(__IXGBE_RX_3K_BUFFER, &ring->state))
-		return IXGBE_RXBUFFER_3K;
-#if (PAGE_SIZE < 8192)
-	return IXGBE_MAX_2K_FRAME_BUILD_SKB;
-#endif
-	return IXGBE_RXBUFFER_2K;
-}
-
-static inline unsigned int ixgbe_rx_pg_order(struct ixgbe_ring *ring)
-{
-#if (PAGE_SIZE < 8192)
-	if (test_bit(__IXGBE_RX_3K_BUFFER, &ring->state))
-		return 1;
-#endif
-	return 0;
-}
-#define ixgbe_rx_pg_size(_ring) (PAGE_SIZE << ixgbe_rx_pg_order(_ring))
 #define IXGBE_ITR_ADAPTIVE_MIN_INC	2
 #define IXGBE_ITR_ADAPTIVE_MIN_USECS	10
 #define IXGBE_ITR_ADAPTIVE_MAX_USECS	126
@@ -909,7 +827,6 @@ struct ixgbe_cb {
 	};
 	dma_addr_t dma;
 	u16 append_cnt;
-	bool page_released;
 };
 #define IXGBE_CB(skb) ((struct ixgbe_cb *)(skb)->cb)
 
