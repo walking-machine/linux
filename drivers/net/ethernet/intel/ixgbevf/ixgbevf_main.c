@@ -283,7 +283,8 @@ static bool ixgbevf_clean_tx_irq(struct ixgbevf_q_vector *q_vector,
 	if (test_bit(__IXGBEVF_DOWN, &adapter->state))
 		return true;
 
-	to_clean = ixgbevf_tx_get_num_sent(tx_ring, budget);
+	to_clean = ixgbevf_desc_used(tx_ring);
+	to_clean = ixgbevf_tx_get_num_sent(tx_ring, min_t(u16, budget, to_clean));
 	budget = budget > to_clean ? budget - to_clean : 0;
 
 	for (int i = 0; i < to_clean; i++) {

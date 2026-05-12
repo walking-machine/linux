@@ -14,8 +14,7 @@ static inline u16 ixgbevf_tx_get_num_sent(struct ixgbevf_ring *tx_ring,
 	u16 ntc = tx_ring->next_to_clean;
 	u16 to_clean = 0;
 
-	while (likely(to_clean < tx_ring->pending) &&
-	       likely(to_clean < budget)) {
+	while (likely(to_clean < budget)) {
 		u32 idx = tx_ring->xdp_sqes[ntc].rs_idx;
 		union ixgbe_adv_tx_desc *rs_desc;
 
@@ -78,7 +77,8 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 
 	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
 	if (unlikely(ixgbevf_desc_unused(xdp_ring) < xdp_ring->thresh)) {
-		u16 to_clean = ixgbevf_tx_get_num_sent(xdp_ring, xdp_ring->count);
+		u16 to_clean =
+			ixgbevf_tx_get_num_sent(xdp_ring, xdp_ring->pending);
 
 		if (likely(to_clean))
 			ixgbevf_clean_xdp_num(xdp_ring, true, to_clean);
