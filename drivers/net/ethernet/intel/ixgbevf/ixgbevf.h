@@ -224,6 +224,14 @@ static inline u16 ixgbevf_desc_unused(struct ixgbevf_ring *ring)
 	return ((ntc > ntu) ? 0 : ring->count) + ntc - ntu - 1;
 }
 
+static inline u16 ixgbevf_desc_used(struct ixgbevf_ring *ring)
+{
+	u16 ntc = ring->next_to_clean;
+	u16 ntu = ring->next_to_use;
+
+	return ((ntu >= ntc) ? 0 : ring->count) + ntu - ntc;
+}
+
 static inline void ixgbevf_write_tail(struct ixgbevf_ring *ring, u32 value)
 {
 	writel(value, ring->tail);
