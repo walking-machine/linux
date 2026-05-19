@@ -334,7 +334,7 @@ __libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
  * when hitting this path.
  */
 #define libeth_xsk_tx_init_bulk(bq, prog, dev, xdpsqs, num)		     \
-	__libeth_xdp_tx_init_bulk(bq, prog, dev, xdpsqs, num, true,	     \
+	__libeth_xdp_tx_init_bulk(bq, prog, dev, xdpsqs, num, true, false,   \
 				  __UNIQUE_ID(bq_), __UNIQUE_ID(nqs_))
 
 struct libeth_xdp_buff *libeth_xsk_buff_add_frag(struct libeth_xdp_buff *head,
