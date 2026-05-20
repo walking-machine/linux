@@ -275,10 +275,14 @@ static void ixgbevf_tx_timeout_reset(struct ixgbevf_adapter *adapter)
  * @netdev: network interface device structure
  * @txqueue: transmit queue hanging (unused)
  **/
-static void ixgbevf_tx_timeout(struct net_device *netdev, unsigned int __always_unused txqueue)
+static void ixgbevf_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
+	struct ixgbevf_ring *tx_ring = adapter->tx_ring[txqueue];
+	u32 ntc = tx_ring->next_to_clean;
 
+	netdev_err(netdev, "Timeout info:\n");
+	netdev_err(netdev, "ntu=%u, ntc=%u, rs_idx=%u, cached_ntu=%u\n", tx_ring->next_to_use, ntc, tx_ring->tx_sqes[ntc].rs_idx, tx_ring->cached_ntu);
 	ixgbevf_tx_timeout_reset(adapter);
 }
 
@@ -2582,10 +2586,10 @@ static void ixgbevf_set_num_queues(struct ixgbevf_adapter *adapter)
 		adapter->num_rx_queues =
 			min_t(u32, adapter->num_req_qpairs, max_qpairs);
 		adapter->num_tx_queues = adapter->num_rx_queues;
-		if (adapter->num_rx_queues + adapter->num_tx_queues <=
-		    adapter->q_caps.max_txqs && adapter->xdp_prog)
-			adapter->num_xdp_queues = adapter->num_rx_queues;
-		else
+		// if (adapter->num_rx_queues + adapter->num_tx_queues <=
+		//     adapter->q_caps.max_txqs && adapter->xdp_prog)
+		// 	adapter->num_xdp_queues = adapter->num_rx_queues;
+		// else
 			adapter->num_xdp_queues = 0;
 	}
 }
