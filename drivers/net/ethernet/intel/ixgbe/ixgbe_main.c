@@ -176,6 +176,7 @@ MODULE_PARM_DESC(debug, "Debug level (0=none,...,16=all)");
 MODULE_IMPORT_NS("LIBIE_FWLOG");
 MODULE_DESCRIPTION("Intel(R) 10 Gigabit PCI Express Network Driver");
 MODULE_IMPORT_NS("LIBETH");
+MODULE_IMPORT_NS("LIBETH_XDP");
 MODULE_LICENSE("GPL v2");
 
 DEFINE_STATIC_KEY_FALSE(ixgbe_xdp_locking_key);
@@ -817,21 +818,11 @@ rx_ring_summary:
 					le64_to_cpu((__force __le64)u0->b),
 					ring_desc);
 			} else {
-				pr_info("R  [0x%03X]     %016llX %016llX %016llX %s\n",
+				pr_info("R  [0x%03X]     %016llX %016llX %s\n",
 					i,
 					le64_to_cpu((__force __le64)u0->a),
 					le64_to_cpu((__force __le64)u0->b),
-					(u64)rx_ring->rx_buffer_info[i].dma,
 					ring_desc);
-			}
-
-			if (netif_msg_pktdata(adapter) &&
-				rx_ring->rx_buffer_info[i].dma) {
-				print_hex_dump(KERN_INFO, "",
-				DUMP_PREFIX_ADDRESS, 16, 1,
-				page_address(rx_ring->rx_buffer_info[i].page) +
-					rx_ring->rx_buffer_info[i].page_offset,
-				IXGBE_RXBUFFER_3K, true);
 			}
 		}
 	}
@@ -1742,7 +1733,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 	u16 ntu = rx_ring->next_to_use;
 
 	/* nothing to do */
-	if (!cleaned_count)
+	if (unlikely(!cleaned_count))
 		return;
 	rx_desc = IXGBE_RX_DESC(rx_ring, ntu);
 
@@ -1758,7 +1749,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 		rx_desc++;
 		ntu++;
 
-		if (unlikely(ntu == rx_ring->count)) {
+		if (unlikely(ntu == fq.count)) {
 			rx_desc = IXGBE_RX_DESC(rx_ring, 0);
 			ntu = 0;
 		}
@@ -2165,7 +2156,6 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 
 		/* exit if we failed to retrieve a buffer */
 		if (unlikely(!xdp_res && !skb)) {
-			libeth_xdp_return_buff_slow(xdp);
 			rx_ring->rx_stats.alloc_rx_buff_failed++;
 			cleaned_count++;
 			break;
@@ -2178,13 +2168,11 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 			continue;
 
 		/* verify the packet layout is correct */
-		if (xdp_res || unlikely(ixgbe_cleanup_headers(rx_ring, rx_desc, skb))) {
+		if (xdp_res ||
+		    unlikely(ixgbe_cleanup_headers(rx_ring, rx_desc, skb))) {
 			skb = NULL;
 			continue;
 		}
-
-		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
 
 		/* populate checksum, timestamp, VLAN, and protocol */
 		ixgbe_process_skb_fields(rx_ring, rx_desc, skb);
@@ -2215,11 +2203,12 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		}
 
 #endif /* IXGBE_FCOE */
+		/* probably a little skewed due to removing CRC */
+		total_rx_bytes += skb->len;
+		total_rx_packets++;
+
 		ixgbe_rx_skb(q_vector, skb);
 		skb = NULL;
-
-		/* update budget accounting */
-		total_rx_packets++;
 	}
 
 	rx_ring->skb = skb;
@@ -6642,13 +6631,6 @@ err_setup_tx:
 	return err;
 }
 
-static int ixgbe_rx_napi_id(struct ixgbe_ring *rx_ring)
-{
-	struct ixgbe_q_vector *q_vector = rx_ring->q_vector;
-
-	return q_vector ? q_vector->napi.napi_id : 0;
-}
-
 /**
  * ixgbe_setup_rx_resources - allocate Rx resources (Descriptors)
  * @adapter: pointer to ixgbe_adapter
@@ -6670,7 +6652,7 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 	};
 	struct device *dev = &adapter->pdev->dev;
 	int orig_node = dev_to_node(dev);
-	void *napi_dev;
+	struct napi_struct *napi_dev;
 	int ring_node = NUMA_NO_NODE;
 	int ret;
 
@@ -6679,8 +6661,7 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 		ring_node = rx_ring->q_vector->numa_node;
 		napi_dev = &rx_ring->q_vector->napi;
 	} else {
-		fq.no_napi = true;
-		napi_dev = &adapter->pdev->dev;
+		napi_dev = NULL;
 	}
 
 	ret = libeth_rx_fq_create(&fq, napi_dev);
