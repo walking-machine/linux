@@ -1732,7 +1732,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 	u16 ntu = rx_ring->next_to_use;
 
 	/* nothing to do */
-	if (!cleaned_count)
+	if (unlikely(!cleaned_count))
 		return;
 	rx_desc = IXGBE_RX_DESC(rx_ring, ntu);
 
@@ -1748,7 +1748,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 		rx_desc++;
 		ntu++;
 
-		if (unlikely(ntu == rx_ring->count)) {
+		if (unlikely(ntu == fq.count)) {
 			rx_desc = IXGBE_RX_DESC(rx_ring, 0);
 			ntu = 0;
 		}
@@ -2121,7 +2121,7 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 
 		rx_desc = IXGBE_RX_DESC(rx_ring, rx_ring->next_to_clean);
 		size = le16_to_cpu(rx_desc->wb.upper.length);
-		if (!size)
+		if (unlikely(!size))
 			break;
 
 		/* This memory barrier is needed to keep us from reading
@@ -2154,7 +2154,7 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		}
 
 		/* exit if we failed to retrieve a buffer */
-		if (!xdp_res && !skb) {
+		if (unlikely(!xdp_res && !skb)) {
 			rx_ring->rx_stats.alloc_rx_buff_failed++;
 			ixgbe_put_rx_buffer(rx_ring, rx_buffer, true);
 			cleaned_count++;
@@ -2168,13 +2168,11 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 			continue;
 
 		/* verify the packet layout is correct */
-		if (xdp_res || ixgbe_cleanup_headers(rx_ring, rx_desc, skb)) {
+		if (xdp_res ||
+		    unlikely(ixgbe_cleanup_headers(rx_ring, rx_desc, skb))) {
 			skb = NULL;
 			continue;
 		}
-
-		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
 
 		/* populate checksum, timestamp, VLAN, and protocol */
 		ixgbe_process_skb_fields(rx_ring, rx_desc, skb);
@@ -2205,11 +2203,12 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		}
 
 #endif /* IXGBE_FCOE */
+		/* probably a little skewed due to removing CRC */
+		total_rx_bytes += skb->len;
+		total_rx_packets++;
+
 		ixgbe_rx_skb(q_vector, skb);
 		skb = NULL;
-
-		/* update budget accounting */
-		total_rx_packets++;
 	}
 
 	rx_ring->skb = skb;
