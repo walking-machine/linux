@@ -1865,7 +1865,7 @@ void ixgbe_rx_skb(struct ixgbe_q_vector *q_vector,
  * ixgbe_is_non_eop - process handling of non-EOP buffers
  * @rx_ring: Rx ring being processed
  * @rx_desc: Rx descriptor for current buffer
- * @skb: Current socket buffer containing buffer in progress
+ * @rsc_append_cnt: pointer to RSC append count accumulator
  *
  * This function updates next to clean.  If the buffer is an EOP buffer
  * this function exits returning false, otherwise it will place the
@@ -1873,8 +1873,8 @@ void ixgbe_rx_skb(struct ixgbe_q_vector *q_vector,
  * that this is in fact a non-EOP buffer.
  **/
 static bool ixgbe_is_non_eop(struct ixgbe_ring *rx_ring,
-				 union ixgbe_adv_rx_desc *rx_desc,
-				 struct sk_buff *skb)
+			     union ixgbe_adv_rx_desc *rx_desc,
+			     u32 *rsc_append_cnt)
 {
 	u32 ntc = rx_ring->next_to_clean + 1;
 
@@ -1893,7 +1893,7 @@ static bool ixgbe_is_non_eop(struct ixgbe_ring *rx_ring,
 			u32 rsc_cnt = le32_to_cpu(rsc_enabled);
 
 			rsc_cnt >>= IXGBE_RXDADV_RSCCNT_SHIFT;
-			IXGBE_CB(skb)->append_cnt += rsc_cnt - 1;
+			*rsc_append_cnt += rsc_cnt - 1;
 
 			/* update ntc based on RSC value */
 			ntc = le32_to_cpu(rx_desc->wb.upper.status_error);
@@ -1960,33 +1960,6 @@ bool ixgbe_cleanup_headers(struct ixgbe_ring *rx_ring,
 
 	return false;
 }
-
-/**
- * ixgbe_add_rx_frag - Add contents of Rx buffer to sk_buff
- * @rx_ring: rx descriptor ring to transact packets on
- * @rx_buffer: buffer containing page to add
- * @skb: sk_buff to place the data into
- * @size: size of data in rx_buffer
- *
- * This function will add the data contained in rx_buffer->page to the skb.
- * This is done either through a direct copy if the data in the buffer is
- * less than the skb header size, otherwise it will just attach the page as
- * a frag to the skb.
- *
- * The function will then update the page offset if necessary and return
- * true if the buffer can be reused by the adapter.
- **/
-static void ixgbe_add_rx_frag(const struct libeth_fqe *rx_buffer,
-				  struct sk_buff *skb,
-				  unsigned int size)
-{
-	u32 hr = netmem_get_pp(rx_buffer->netmem)->p.offset;
-
-	skb_add_rx_frag_netmem(skb, skb_shinfo(skb)->nr_frags,
-				   rx_buffer->netmem, rx_buffer->offset + hr,
-				   size, rx_buffer->truesize);
-}
-
 
 static int ixgbe_run_xdp(struct ixgbe_adapter *adapter,
 			 struct ixgbe_ring *rx_ring,
@@ -2069,16 +2042,16 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 #endif /* IXGBE_FCOE */
 	u16 cleaned_count = ixgbe_desc_unused(rx_ring);
 	LIBETH_XDP_ONSTACK_BUFF(xdp);
-	struct sk_buff *skb = rx_ring->skb;
 	unsigned int xdp_xmit = 0;
+	u32 rsc_append_cnt = 0;
 	int xdp_res = 0;
 
-	xdp->data = NULL;
-	xdp->base.rxq = &rx_ring->xdp_rxq;
+	libeth_xdp_init_buff(xdp, &rx_ring->xdp_stash, &rx_ring->xdp_rxq);
 
 	while (likely(total_rx_packets < budget)) {
 		union ixgbe_adv_rx_desc *rx_desc;
 		struct libeth_fqe *rx_buffer;
+		struct sk_buff *skb;
 		unsigned int size;
 
 		/* return some buffers to hardware, one at a time is too slow */
@@ -2099,43 +2072,43 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		dma_rmb();
 
 		rx_buffer = &rx_ring->rx_fqes[rx_ring->next_to_clean];
+		libeth_xdp_process_buff(xdp, rx_buffer, size);
 
-		/* retrieve a buffer from the ring */
-		if (!skb) {
-			libeth_xdp_process_buff(xdp, rx_buffer, size);
-			xdp_res = ixgbe_run_xdp(adapter, rx_ring, xdp);
-		} else {
-			libeth_rx_sync_for_cpu(rx_buffer, size);
-		}
+		cleaned_count++;
+		/* fetch next buffer in frame if non-eop */
+		if (ixgbe_is_non_eop(rx_ring, rx_desc, &rsc_append_cnt) ||
+		    unlikely(!xdp->data))
+			continue;
 
+		xdp_res = ixgbe_run_xdp(adapter, rx_ring, xdp);
 		if (xdp_res) {
 			if (xdp_res & (IXGBE_XDP_TX | IXGBE_XDP_REDIR))
 				xdp_xmit |= xdp_res;
 
 			total_rx_packets++;
-			total_rx_bytes += size;
-		} else if (skb) {
-			ixgbe_add_rx_frag(rx_buffer, skb, size);
-		} else {
-			skb = xdp_build_skb_from_buff(&xdp->base);
+			total_rx_bytes += xdp_get_buff_len(&xdp->base);
+			rsc_append_cnt = 0;
+			xdp->data = NULL;
+			continue;
 		}
+
+		skb = xdp_build_skb_from_buff(&xdp->base);
 
 		/* exit if we failed to retrieve a buffer */
-		if (unlikely(!xdp_res && !skb)) {
+		if (unlikely(!skb)) {
+			rsc_append_cnt = 0;
+			libeth_xdp_return_buff_slow(xdp);
 			rx_ring->rx_stats.alloc_rx_buff_failed++;
-			cleaned_count++;
 			break;
 		}
+		xdp->data = NULL;
 
-		cleaned_count++;
-
-		/* place incomplete frames back on ring for completion */
-		if (ixgbe_is_non_eop(rx_ring, rx_desc, skb))
-			continue;
+		/* apply RSC append count to skb if accumulated */
+		IXGBE_CB(skb)->append_cnt = rsc_append_cnt;
+		rsc_append_cnt = 0;
 
 		/* verify the packet layout is correct */
-		if (xdp_res ||
-		    unlikely(ixgbe_cleanup_headers(rx_ring, rx_desc, skb))) {
+		if (unlikely(ixgbe_cleanup_headers(rx_ring, rx_desc, skb))) {
 			skb = NULL;
 			continue;
 		}
@@ -2174,10 +2147,10 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		total_rx_packets++;
 
 		ixgbe_rx_skb(q_vector, skb);
-		skb = NULL;
 	}
 
-	rx_ring->skb = skb;
+	/* place incomplete frames back on ring for completion */
+	libeth_xdp_save_buff(&rx_ring->xdp_stash, xdp);
 
 	if (xdp_xmit & IXGBE_XDP_REDIR)
 		xdp_do_flush();
@@ -5227,11 +5200,8 @@ static void ixgbe_clean_rx_ring(struct ixgbe_ring *rx_ring)
 		goto skip_free;
 	}
 
-	/* Free Rx ring sk_buff */
-	if (rx_ring->skb) {
-		dev_kfree_skb(rx_ring->skb);
-		rx_ring->skb = NULL;
-	}
+	/* Free Rx ring xdp stash */
+	libeth_xdp_return_stash(&rx_ring->xdp_stash);
 
 	for (u32 i = rx_ring->next_to_clean; i != rx_ring->next_to_use; ) {
 		const struct libeth_fqe *rx_fqe = &rx_ring->rx_fqes[i];
@@ -6653,6 +6623,8 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 						   GFP_KERNEL);
 	if (!rx_ring->desc) {
 		ret = -ENOMEM;
+		dev_err(&adapter->pdev->dev,
+			"Unable to allocate memory for the Rx descriptor ring\n");
 		goto err_destroy_fq;
 	}
 
@@ -6675,7 +6647,6 @@ err_free_desc:
 			  rx_ring->desc, rx_ring->dma);
 	rx_ring->desc = NULL;
 err_destroy_fq:
-	dev_err(dev, "Unable to allocate memory for the Rx descriptor ring\n");
 	libeth_rx_fq_destroy(&fq);
 	rx_ring->rx_fqes = NULL;
 	rx_ring->pp = NULL;
@@ -10364,13 +10335,15 @@ ixgbe_features_check(struct sk_buff *skb, struct net_device *dev,
 	return features;
 }
 
-static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
+static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog,
+			   struct netlink_ext_ack *extack)
 {
-	int i, frame_size = READ_ONCE(dev->mtu) + LIBETH_RX_LL_LEN;
+	u32 frame_size = READ_ONCE(dev->mtu) + LIBETH_RX_LL_LEN;
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(dev);
 	struct bpf_prog *old_prog;
 	bool need_reset;
 	int num_queues;
+	bool requires_mbuf;
 
 	if (adapter->flags & IXGBE_FLAG_SRIOV_ENABLED)
 		return -EINVAL;
@@ -10379,15 +10352,19 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 		return -EINVAL;
 
 	/* verify ixgbe ring attributes are sufficient for XDP */
-	for (i = 0; i < adapter->num_rx_queues; i++) {
+	for (int i = 0; i < adapter->num_rx_queues; i++) {
 		struct ixgbe_ring *ring = adapter->rx_ring[i];
 
 		if (ring_is_rsc_enabled(ring))
 			return -EINVAL;
 	}
 
-	if (frame_size > IXGBE_RXBUFFER_3K)
-		return -EINVAL;
+	requires_mbuf = frame_size > IXGBE_RX_PAGE_LEN(LIBETH_XDP_HEADROOM);
+	if (prog && !prog->aux->xdp_has_frags && requires_mbuf) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Configured MTU requires non-linear frames and XDP prog does not support frags");
+		return -EOPNOTSUPP;
+	}
 
 	/* if the number of cpus is much larger than the maximum of queues,
 	 * we should stop it and then return with ENOMEM like before.
@@ -10412,7 +10389,7 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 		if (!prog)
 			xdp_features_clear_redirect_target(dev);
 	} else {
-		for (i = 0; i < adapter->num_rx_queues; i++) {
+		for (int i = 0; i < adapter->num_rx_queues; i++) {
 			WRITE_ONCE(adapter->rx_ring[i]->xdp_prog,
 				   adapter->xdp_prog);
 		}
@@ -10427,7 +10404,7 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 	if (need_reset && prog) {
 		num_queues = min_t(int, adapter->num_rx_queues,
 				   adapter->num_xdp_queues);
-		for (i = 0; i < num_queues; i++)
+		for (int i = 0; i < num_queues; i++)
 			if (adapter->xdp_ring[i]->xsk_pool)
 				(void)ixgbe_xsk_wakeup(adapter->netdev, i,
 							   XDP_WAKEUP_RX);
@@ -10443,7 +10420,7 @@ static int ixgbe_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
-		return ixgbe_xdp_setup(dev, xdp->prog);
+		return ixgbe_xdp_setup(dev, xdp->prog, xdp->extack);
 	case XDP_SETUP_XSK_POOL:
 		return ixgbe_xsk_pool_setup(adapter, xdp->xsk.pool,
 						xdp->xsk.queue_id);
@@ -11279,7 +11256,8 @@ skip_sriov:
 	netdev->priv_flags |= IFF_SUPP_NOFCS;
 
 	netdev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_REDIRECT |
-				   NETDEV_XDP_ACT_XSK_ZEROCOPY;
+			       NETDEV_XDP_ACT_XSK_ZEROCOPY |
+			       NETDEV_XDP_ACT_RX_SG;
 
 	/* MTU range: 68 - 9710 */
 	netdev->min_mtu = ETH_MIN_MTU;
