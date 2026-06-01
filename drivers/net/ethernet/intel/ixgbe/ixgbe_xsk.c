@@ -4,6 +4,7 @@
 #include <linux/bpf_trace.h>
 #include <net/xdp_sock_drv.h>
 #include <net/xdp.h>
+#include <net/libeth/xdp.h>
 
 #include "ixgbe.h"
 #include "ixgbe_txrx_common.h"
@@ -126,11 +127,9 @@ static int ixgbe_run_xdp_zc(struct ixgbe_adapter *adapter,
 		if (unlikely(!xdpf))
 			goto out_failure;
 		ring = ixgbe_determine_xdp_ring(adapter);
-		if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-			spin_lock(&ring->tx_lock);
+		libeth_xdpsq_lock(&ring->xdpq_lock);
 		result = ixgbe_xmit_xdp_ring(ring, xdpf);
-		if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-			spin_unlock(&ring->tx_lock);
+		libeth_xdpsq_unlock(&ring->xdpq_lock);
 		if (result == IXGBE_XDP_CONSUMED)
 			goto out_failure;
 		break;
