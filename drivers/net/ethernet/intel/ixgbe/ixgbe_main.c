@@ -1742,6 +1742,12 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 		.truesize	= rx_ring->truesize,
 		.count		= rx_ring->count,
 	};
+	const struct libeth_fq_fp hdr_fq = {
+		.pp		= rx_ring->hdr_pp,
+		.fqes		= rx_ring->hdr_fqes,
+		.truesize	= rx_ring->hdr_truesize,
+		.count		= rx_ring->count,
+	};
 	u16 ntu = rx_ring->next_to_use;
 
 	/* nothing to do */
@@ -1757,6 +1763,14 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 			break;
 
 		rx_desc->read.pkt_addr = cpu_to_le64(addr);
+
+		if (hdr_fq.pp) {
+			addr = libeth_rx_alloc(&hdr_fq, ntu);
+			if (addr == DMA_MAPPING_ERROR) {
+				libeth_rx_recycle_slow(fq.fqes[ntu].netmem);
+				break;
+			}
+		}
 
 		rx_desc++;
 		ntu++;
@@ -2017,6 +2031,32 @@ xdp_out:
 	return result;
 }
 
+static u32 ixgbe_rx_hsplit_wa(const struct libeth_fqe *hdr,
+			      struct libeth_fqe *buf, u32 data_len)
+{
+	u32 copy = data_len <= L1_CACHE_BYTES ? data_len : ETH_HLEN;
+	struct page *hdr_page, *buf_page;
+	const void *src;
+	void *dst;
+
+	if (unlikely(netmem_is_net_iov(buf->netmem)) ||
+	    !libeth_rx_sync_for_cpu(buf, copy))
+		return 0;
+
+	hdr_page = __netmem_to_page(hdr->netmem);
+	buf_page = __netmem_to_page(buf->netmem);
+
+	dst = page_address(hdr_page) + hdr->offset +
+	      pp_page_to_nmdesc(hdr_page)->pp->p.offset;
+	src = page_address(buf_page) + buf->offset +
+	      pp_page_to_nmdesc(buf_page)->pp->p.offset;
+
+	memcpy(dst, src, LARGEST_ALIGN(copy));
+	buf->offset += copy;
+
+	return copy;
+}
+
 /**
  * ixgbe_clean_rx_irq - Clean completed descriptors from Rx ring - bounce buf
  * @q_vector: structure containing interrupt and ring information
@@ -2072,6 +2112,23 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		dma_rmb();
 
 		rx_buffer = &rx_ring->rx_fqes[rx_ring->next_to_clean];
+
+		if (unlikely(rx_ring->hdr_pp)) {
+			struct libeth_fqe *hdr_buff;
+			unsigned int hdr_size = 0;
+
+			hdr_buff = &rx_ring->hdr_fqes[rx_ring->next_to_clean];
+
+			if (!xdp->data) {
+				hdr_size = ixgbe_rx_hsplit_wa(hdr_buff,
+							     rx_buffer,
+							     size);
+				size -= hdr_size ? : size;
+			}
+
+			libeth_xdp_process_buff(xdp, hdr_buff, hdr_size);
+		}
+
 		libeth_xdp_process_buff(xdp, rx_buffer, size);
 
 		cleaned_count++;
@@ -6365,6 +6422,7 @@ static int ixgbe_sw_init(struct ixgbe_adapter *adapter,
 	case ixgbe_mac_82599EB:
 		if (hw->device_id == IXGBE_DEV_ID_82599_T3_LOM)
 			adapter->flags2 |= IXGBE_FLAG2_TEMP_SENSOR_CAPABLE;
+		adapter->flags2 |= IXGBE_FLAG2_HSPLIT;
 		break;
 	case ixgbe_mac_X540:
 		fwsm = IXGBE_READ_REG(hw, IXGBE_FWSM(hw));
@@ -6567,6 +6625,88 @@ err_setup_tx:
 	return err;
 }
 
+static void ixgbe_rx_destroy_pp(struct ixgbe_ring *rx_ring)
+{
+	struct libeth_fq fq = {
+		.pp	= rx_ring->pp,
+		.fqes	= rx_ring->rx_fqes,
+	};
+
+	libeth_rx_fq_destroy(&fq);
+	rx_ring->rx_fqes = NULL;
+	rx_ring->pp = NULL;
+
+	if (!rx_ring->hdr_pp)
+		return;
+
+	fq = (struct libeth_fq) {
+		.pp	= rx_ring->hdr_pp,
+		.fqes	= rx_ring->hdr_fqes,
+	};
+
+	libeth_rx_fq_destroy(&fq);
+	rx_ring->hdr_fqes = NULL;
+	rx_ring->hdr_pp = NULL;
+}
+
+static int ixgbe_rx_create_pp(struct ixgbe_ring *rx_ring)
+{
+	struct ixgbe_adapter *adapter = netdev_priv(rx_ring->netdev);
+	struct libeth_fq fq = {
+		.count		= rx_ring->count,
+		.nid		= NUMA_NO_NODE,
+		.type		= LIBETH_FQE_MTU,
+		.xdp		= !!rx_ring->xdp_prog,
+		.buf_len	= IXGBE_RX_PAGE_LEN(rx_ring->xdp_prog ?
+						    LIBETH_XDP_HEADROOM :
+						    LIBETH_SKB_HEADROOM),
+	};
+	u32 frame_size;
+	int ret;
+
+	/* Some HW requires DMA write sizes to be aligned to 1K,
+	 * which warrants fake header split usage, but this is
+	 * not an issue if the frame size is at its maximum of 3K
+	 */
+	frame_size =
+		IXGBE_RX_SRRCTL_BUF_SIZE(READ_ONCE(rx_ring->netdev->mtu));
+	fq.hsplit = (adapter->flags2 & IXGBE_FLAG2_HSPLIT) &&
+		    frame_size < fq.buf_len;
+
+	ret = libeth_rx_fq_create(&fq, &rx_ring->q_vector->napi);
+	if (ret)
+		return ret;
+
+	rx_ring->pp = fq.pp;
+	rx_ring->rx_fqes = fq.fqes;
+	rx_ring->truesize = fq.truesize;
+	rx_ring->rx_buf_len = fq.buf_len;
+
+	if (!fq.hsplit)
+		return 0;
+
+	fq = (struct libeth_fq) {
+		.count		= rx_ring->count,
+		.nid		= NUMA_NO_NODE,
+		.type		= LIBETH_FQE_HDR,
+		.xdp		= !!rx_ring->xdp_prog,
+	};
+
+	ret = libeth_rx_fq_create(&fq, &rx_ring->q_vector->napi);
+	if (ret)
+		goto err;
+
+	rx_ring->hdr_pp = fq.pp;
+	rx_ring->hdr_fqes = fq.fqes;
+	rx_ring->hdr_truesize = fq.truesize;
+
+	return 0;
+
+err:
+	ixgbe_rx_destroy_pp(rx_ring);
+	return ret;
+}
+
 /**
  * ixgbe_setup_rx_resources - allocate Rx resources (Descriptors)
  * @adapter: pointer to ixgbe_adapter
@@ -6577,37 +6717,17 @@ err_setup_tx:
 int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 				 struct ixgbe_ring *rx_ring)
 {
-	struct libeth_fq fq = {
-		.count		= rx_ring->count,
-		.nid		= NUMA_NO_NODE,
-		.type		= LIBETH_FQE_MTU,
-		.xdp		= !!rx_ring->xdp_prog,
-		.buf_len	= IXGBE_RX_PAGE_LEN(rx_ring->xdp_prog ?
-							LIBETH_XDP_HEADROOM :
-							LIBETH_SKB_HEADROOM),
-	};
 	struct device *dev = &adapter->pdev->dev;
 	int orig_node = dev_to_node(dev);
-	struct napi_struct *napi_dev;
 	int ring_node = NUMA_NO_NODE;
 	int ret;
 
-	if (rx_ring->q_vector) {
-		fq.nid = rx_ring->q_vector->numa_node;
+	if (rx_ring->q_vector)
 		ring_node = rx_ring->q_vector->numa_node;
-		napi_dev = &rx_ring->q_vector->napi;
-	} else {
-		napi_dev = NULL;
-	}
 
-	ret = libeth_rx_fq_create(&fq, &rx_ring->q_vector->napi);
+	ret = ixgbe_rx_create_pp(rx_ring);
 	if (ret)
 		return ret;
-
-	rx_ring->pp = fq.pp;
-	rx_ring->rx_fqes = fq.fqes;
-	rx_ring->truesize = fq.truesize;
-	rx_ring->rx_buf_len = fq.buf_len;
 
 	/* Round up to nearest 4K */
 	rx_ring->size = rx_ring->count * sizeof(union ixgbe_adv_rx_desc);
@@ -6637,7 +6757,7 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 	if (ret < 0)
 		goto err_free_desc;
 
-	xdp_rxq_info_attach_page_pool(&rx_ring->xdp_rxq, fq.pp);
+	xdp_rxq_info_attach_page_pool(&rx_ring->xdp_rxq, rx_ring->pp);
 	rcu_assign_pointer(rx_ring->xdp_prog, adapter->xdp_prog);
 
 	return 0;
@@ -6647,9 +6767,8 @@ err_free_desc:
 			  rx_ring->desc, rx_ring->dma);
 	rx_ring->desc = NULL;
 err_destroy_fq:
-	libeth_rx_fq_destroy(&fq);
-	rx_ring->rx_fqes = NULL;
-	rx_ring->pp = NULL;
+	dev_err(dev, "Unable to allocate memory for the Rx descriptor ring\n");
+	ixgbe_rx_destroy_pp(rx_ring);
 	return ret;
 }
 
@@ -6737,11 +6856,6 @@ static void ixgbe_free_all_tx_resources(struct ixgbe_adapter *adapter)
  **/
 void ixgbe_free_rx_resources(struct ixgbe_ring *rx_ring)
 {
-	struct libeth_fq fq = {
-		.fqes	= rx_ring->rx_fqes,
-		.pp	= rx_ring->pp,
-	};
-
 	ixgbe_clean_rx_ring(rx_ring);
 
 	rcu_assign_pointer(rx_ring->xdp_prog, NULL);
@@ -6752,7 +6866,7 @@ void ixgbe_free_rx_resources(struct ixgbe_ring *rx_ring)
 	if (!rx_ring->desc)
 		return;
 
-	dma_free_coherent(fq.pp->p.dev, rx_ring->size, rx_ring->desc,
+	dma_free_coherent(rx_ring->pp->p.dev, rx_ring->size, rx_ring->desc,
 			  rx_ring->dma);
 
 	rx_ring->desc = NULL;
@@ -6760,9 +6874,7 @@ void ixgbe_free_rx_resources(struct ixgbe_ring *rx_ring)
 	kvfree(rx_ring->rx_xsk_buffer_info);
 	rx_ring->rx_xsk_buffer_info = NULL;
 
-	libeth_rx_fq_destroy(&fq);
-	rx_ring->rx_fqes = NULL;
-	rx_ring->pp = NULL;
+	ixgbe_rx_destroy_pp(rx_ring);
 }
 
 /**
@@ -10359,10 +10471,11 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog,
 			return -EINVAL;
 	}
 
-	requires_mbuf = frame_size > IXGBE_RX_PAGE_LEN(LIBETH_XDP_HEADROOM);
+	requires_mbuf = frame_size > IXGBE_RX_PAGE_LEN(LIBETH_XDP_HEADROOM) ||
+		       adapter->flags2 & IXGBE_FLAG2_HSPLIT;
 	if (prog && !prog->aux->xdp_has_frags && requires_mbuf) {
 		NL_SET_ERR_MSG_MOD(extack,
-				   "Configured MTU requires non-linear frames and XDP prog does not support frags");
+				   "HW limitations or configured MTU requires non-linear frames and XDP prog does not support frags");
 		return -EOPNOTSUPP;
 	}
 

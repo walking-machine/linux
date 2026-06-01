@@ -78,6 +78,8 @@
 
 #define IXGBE_RX_PAGE_LEN(hr)		(ALIGN_DOWN(LIBETH_RX_PAGE_LEN(hr), \
 					 IXGBE_SRRCTL_BSIZEPKT_STEP))
+#define IXGBE_RX_SRRCTL_BUF_SIZE(mtu)	(ALIGN((mtu) + LIBETH_RX_LL_LEN, \
+					 IXGBE_SRRCTL_BSIZEPKT_STEP))
 
 /* Default HW header buffer size */
 #define IXGBE_RX_HDR_SIZE IXGBE_RXBUFFER_256
@@ -276,6 +278,7 @@ struct ixgbe_ring {
 	dma_addr_t dma;			/* phys. address of descriptor ring */
 	unsigned int size;		/* length in bytes */
 	u32 truesize;
+	u32 hdr_truesize;		/* Rx header buffer full size */
 
 	u8 queue_index; /* needed for multiqueue queue management */
 	u8 reg_idx;			/* holds the special value that gets
@@ -298,9 +301,12 @@ struct ixgbe_ring {
 		struct ixgbe_tx_queue_stats tx_stats;
 		struct ixgbe_rx_queue_stats rx_stats;
 	};
+	struct libeth_fqe *hdr_fqes;
+	struct page_pool *hdr_pp;
 	struct xdp_rxq_info xdp_rxq;
 	spinlock_t tx_lock;	/* used in XDP mode */
 	u16 ring_idx;		/* {rx,tx,xdp}_ring back reference idx */
+	u32 hdr_buf_len;
 	u32 rx_buf_len;
 	struct libeth_xdp_buff_stash xdp_stash;
 	struct ixgbe_xsk_rx_buffer *rx_xsk_buffer_info;
@@ -556,6 +562,7 @@ struct ixgbe_adapter {
 #define IXGBE_FLAG2_MOD_POWER_UNSUPPORTED	BIT(22)
 #define IXGBE_FLAG2_API_MISMATCH		BIT(23)
 #define IXGBE_FLAG2_FW_ROLLBACK			BIT(24)
+#define IXGBE_FLAG2_HSPLIT			BIT(25)
 
 	/* Tx fast path data */
 	int num_tx_queues;
