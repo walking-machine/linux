@@ -1741,8 +1741,8 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 	};
 	u16 ntu = rx_ring->next_to_use;
 
-	/* nothing to do */
-	if (unlikely(!cleaned_count))
+	/* nothing to do or page pool is not present */
+	if (unlikely(!cleaned_count || !fq.pp))
 		return;
 	rx_desc = IXGBE_RX_DESC(rx_ring, ntu);
 
@@ -4189,6 +4189,7 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 	u64 rdba = ring->dma;
 	u32 rxdctl;
 	u8 reg_idx = ring->reg_idx;
+	int err;
 
 	ixgbe_rx_destroy_pp(ring);
 	ring->xsk_pool = ixgbe_xsk_pool(adapter, ring);
@@ -4201,7 +4202,13 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 						   NULL));
 		xsk_pool_set_rxq_info(ring->xsk_pool, &ring->xdp_rxq);
 	} else {
-		ixgbe_rx_create_pp(ring);
+		err = ixgbe_rx_create_pp(ring);
+		if (err) {
+			netdev_err(ring->netdev,
+				   "Failed to create Page Pool for buffer allocation: (%pe), RxQ %d is disabled, driver reload may be needed\n",
+				   ERR_PTR(err), ring->queue_index);
+			return;
+		}
 	}
 
 	/* disable queue to avoid use of these values while updating state */
@@ -7027,13 +7034,16 @@ static void ixgbe_free_all_rx_resources(struct ixgbe_adapter *adapter)
 			ixgbe_free_rx_resources(adapter->rx_ring[i]);
 }
 
-/**
- * ixgbe_max_xdp_frame_size - returns the maximum allowed frame size for XDP
- * @adapter: device handle, pointer to adapter
- */
-static int ixgbe_max_xdp_frame_size(struct ixgbe_adapter *adapter)
+static bool ixgbe_xdp_mtu_ok(const struct ixgbe_adapter *adapter,
+			     const struct bpf_prog *prog, unsigned int mtu)
 {
-	return IXGBE_RXBUFFER_3K;
+	u32 frame_size = mtu + LIBETH_RX_LL_LEN;
+	bool requires_mbuf;
+
+	requires_mbuf = frame_size > IXGBE_RX_PAGE_LEN(LIBETH_XDP_HEADROOM) ||
+			adapter->flags2 & IXGBE_FLAG2_HSPLIT;
+
+	return prog->aux->xdp_has_frags || !requires_mbuf;
 }
 
 /**
@@ -7047,13 +7057,11 @@ static int ixgbe_change_mtu(struct net_device *netdev, int new_mtu)
 {
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 
-	if (ixgbe_enabled_xdp_adapter(adapter)) {
-		int new_frame_size = new_mtu + LIBETH_RX_LL_LEN;
-
-		if (new_frame_size > ixgbe_max_xdp_frame_size(adapter)) {
-			e_warn(probe, "Requested MTU size is not supported with XDP\n");
-			return -EINVAL;
-		}
+	if (adapter->xdp_prog &&
+	    !ixgbe_xdp_mtu_ok(adapter, adapter->xdp_prog, new_mtu)) {
+		netdev_warn(netdev,
+			    "MTU value provided cannot be set while current XDP program is attached\n");
+		return -EPERM;
 	}
 
 	/*
@@ -10581,12 +10589,10 @@ ixgbe_features_check(struct sk_buff *skb, struct net_device *dev,
 static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog,
 			   struct netlink_ext_ack *extack)
 {
-	u32 frame_size = READ_ONCE(dev->mtu) + LIBETH_RX_LL_LEN;
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(dev);
 	struct bpf_prog *old_prog;
 	bool need_reset;
 	int num_queues;
-	bool requires_mbuf;
 
 	if (adapter->flags & IXGBE_FLAG_SRIOV_ENABLED)
 		return -EINVAL;
@@ -10602,9 +10608,7 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog,
 			return -EINVAL;
 	}
 
-	requires_mbuf = frame_size > IXGBE_RX_PAGE_LEN(LIBETH_XDP_HEADROOM) ||
-		       adapter->flags2 & IXGBE_FLAG2_HSPLIT;
-	if (prog && !prog->aux->xdp_has_frags && requires_mbuf) {
+	if (prog && !ixgbe_xdp_mtu_ok(adapter, prog, READ_ONCE(dev->mtu))) {
 		NL_SET_ERR_MSG_MOD(extack,
 				   "HW limitations or configured MTU requires non-linear frames and XDP prog does not support frags");
 		return -EOPNOTSUPP;
