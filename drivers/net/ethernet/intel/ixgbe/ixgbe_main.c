@@ -1386,10 +1386,7 @@ static bool ixgbe_clean_tx_irq(struct ixgbe_q_vector *q_vector,
 			total_ipsec++;
 
 		/* free the skb */
-		if (ring_is_xdp(tx_ring))
-			xdp_return_frame(tx_buffer->xdpf);
-		else
-			napi_consume_skb(tx_buffer->skb, napi_budget);
+		napi_consume_skb(tx_buffer->skb, napi_budget);
 
 		/* unmap skb header data */
 		dma_unmap_single(tx_ring->dev,
@@ -1443,9 +1440,6 @@ static bool ixgbe_clean_tx_irq(struct ixgbe_q_vector *q_vector,
 	ixgbe_update_tx_ring_stats(tx_ring, q_vector, total_packets,
 				   total_bytes);
 	adapter->tx_ipsec += total_ipsec;
-
-	if (ring_is_xdp(tx_ring))
-		return !!budget;
 
 	if (check_for_tx_hang(tx_ring) && ixgbe_check_tx_hang(tx_ring)) {
 		if (adapter->hw.mac.type == ixgbe_mac_e610)
@@ -1961,18 +1955,185 @@ bool ixgbe_cleanup_headers(struct ixgbe_ring *rx_ring,
 	return false;
 }
 
-static int ixgbe_run_xdp(struct ixgbe_adapter *adapter,
+static void ixgbe_clean_xdp_num(struct ixgbe_ring *xdp_ring, bool in_napi,
+				u16 to_clean)
+{
+	struct libeth_xdpsq_napi_stats stats = { };
+	u32 ntc = xdp_ring->next_to_clean;
+	struct xdp_frame_bulk cbulk;
+	struct libeth_cq_pp cp = {
+		.bq = &cbulk,
+		.dev = xdp_ring->dev,
+		.xss = &stats,
+		.napi = in_napi,
+	};
+
+	xdp_frame_bulk_init(&cbulk);
+	xdp_ring->pending -= to_clean;
+
+	while (likely(to_clean--)) {
+		libeth_xdp_complete_tx(&xdp_ring->xdp_sqes[ntc], &cp);
+		ntc++;
+		ntc = unlikely(ntc == xdp_ring->count) ? 0 : ntc;
+	}
+
+	xdp_ring->next_to_clean = ntc;
+	xdp_flush_frame_bulk(&cbulk);
+}
+
+static u16 ixgbe_tx_get_num_sent(struct ixgbe_ring *xdp_ring)
+{
+	u16 ntc = xdp_ring->next_to_clean;
+	u16 to_clean = 0;
+
+	while (likely(to_clean < xdp_ring->pending)) {
+		u32 idx = xdp_ring->xdp_sqes[ntc].rs_idx;
+		union ixgbe_adv_tx_desc *rs_desc;
+
+		if (!idx--)
+			break;
+
+		rs_desc = IXGBE_TX_DESC(xdp_ring, idx);
+
+		if (!(rs_desc->wb.status & cpu_to_le32(IXGBE_TXD_STAT_DD)))
+			break;
+
+		xdp_ring->xdp_sqes[ntc].rs_idx = 0;
+
+		to_clean +=
+			(idx >= ntc ? idx : idx + xdp_ring->count) - ntc + 1;
+
+		ntc = (idx + 1 == xdp_ring->count) ? 0 : idx + 1;
+	}
+
+	return to_clean;
+}
+
+static void ixgbe_clean_xdp_ring(struct ixgbe_ring *xdp_ring)
+{
+	ixgbe_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
+}
+
+static u32 ixgbe_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
+{
+	struct ixgbe_ring *xdp_ring = xdpsq;
+
+	if (unlikely(ixgbe_desc_unused(xdp_ring) < LIBETH_XDP_TX_BULK)) {
+		u16 to_clean = ixgbe_tx_get_num_sent(xdp_ring);
+
+		if (likely(to_clean))
+			ixgbe_clean_xdp_num(xdp_ring, true, to_clean);
+	}
+
+	if (unlikely(!test_bit(__IXGBE_TX_XDP_RING_PRIMED,
+			       &xdp_ring->state))) {
+		struct ixgbe_adv_tx_context_desc *context_desc;
+
+		set_bit(__IXGBE_TX_XDP_RING_PRIMED, &xdp_ring->state);
+
+		context_desc = IXGBE_TX_CTXTDESC(xdp_ring, 0);
+		context_desc->vlan_macip_lens	=
+			cpu_to_le32(ETH_HLEN << IXGBE_ADVTXD_MACLEN_SHIFT);
+		context_desc->fceof_saidx	= 0;
+		context_desc->type_tucmd_mlhl	=
+			cpu_to_le32(IXGBE_TXD_CMD_DEXT |
+				    IXGBE_ADVTXD_DTYP_CTXT);
+		context_desc->mss_l4len_idx	= 0;
+
+		xdp_ring->next_to_use = 1;
+		xdp_ring->pending = 1;
+
+		/* Finish descriptor writes before bumping tail */
+		wmb();
+		writel(1, xdp_ring->tail);
+	}
+
+	*sq = (struct libeth_xdpsq) {
+		.count = xdp_ring->count,
+		.descs = xdp_ring->desc,
+		.lock = NULL,
+		.ntu = &xdp_ring->next_to_use,
+		.pending = &xdp_ring->pending,
+		.pool = NULL,
+		.sqes = xdp_ring->xdp_sqes,
+	};
+
+	return ixgbe_desc_unused(xdp_ring);
+}
+
+static void ixgbe_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
+				const struct libeth_xdpsq *sq,
+				u64 priv)
+{
+	union ixgbe_adv_tx_desc *tx_desc =
+		&((union ixgbe_adv_tx_desc *)sq->descs)[i];
+
+	u32 cmd_type = IXGBE_ADVTXD_DTYP_DATA |
+		       IXGBE_ADVTXD_DCMD_DEXT |
+		       IXGBE_ADVTXD_DCMD_IFCS |
+		       desc.len;
+
+	if (desc.flags & LIBETH_XDP_TX_LAST)
+		cmd_type |= IXGBE_TXD_CMD_EOP;
+
+	if (desc.flags & LIBETH_XDP_TX_FIRST) {
+		struct skb_shared_info *sinfo = sq->sqes[i].sinfo;
+		u16 full_len = desc.len + sinfo->xdp_frags_size;
+
+		tx_desc->read.olinfo_status =
+			cpu_to_le32((full_len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
+				    IXGBE_ADVTXD_CC);
+	}
+
+	tx_desc->read.buffer_addr = cpu_to_le64(desc.addr);
+	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
+}
+
+LIBETH_XDP_DEFINE_START();
+LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbe_xdp_flush_tx, ixgbe_prep_xdp_sq,
+			   ixgbe_xdp_xmit_desc);
+LIBETH_XDP_DEFINE_END();
+
+static void ixgbe_xdp_set_rs(struct ixgbe_ring *xdp_ring, u32 cached_ntu)
+{
+	u32 ltu = (xdp_ring->next_to_use ? : xdp_ring->count) - 1;
+	union ixgbe_adv_tx_desc *desc;
+
+	desc = IXGBE_TX_DESC(xdp_ring, ltu);
+	xdp_ring->xdp_sqes[cached_ntu].rs_idx = ltu + 1;
+	desc->read.cmd_type_len |= cpu_to_le32(IXGBE_TXD_CMD);
+}
+
+static void ixgbe_rx_finalize_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
+				  bool xdp_xmit, u32 cached_ntu)
+{
+	struct ixgbe_ring *xdp_ring = tx_bulk->xdpsq;
+
+	if (!xdp_xmit)
+		goto unlock;
+
+	if (tx_bulk->count)
+		ixgbe_xdp_flush_tx(tx_bulk, LIBETH_XDP_TX_DROP);
+
+	ixgbe_xdp_set_rs(xdp_ring, cached_ntu);
+
+	/* Finish descriptor writes before bumping tail */
+	wmb();
+	writel(xdp_ring->next_to_use, xdp_ring->tail);
+unlock:
+	rcu_read_unlock();
+}
+
+static int ixgbe_run_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
+			 struct ixgbe_adapter *adapter,
 			 struct ixgbe_ring *rx_ring,
 			 struct libeth_xdp_buff *xdp)
 {
 	int err, result = IXGBE_XDP_PASS;
-	struct bpf_prog *xdp_prog;
-	struct ixgbe_ring *ring;
-	struct xdp_frame *xdpf;
+	const struct bpf_prog *xdp_prog;
 	u32 act;
 
-	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
-
+	xdp_prog = tx_bulk->prog;
 	if (!xdp_prog)
 		goto xdp_out;
 
@@ -1983,17 +2144,10 @@ static int ixgbe_run_xdp(struct ixgbe_adapter *adapter,
 	case XDP_PASS:
 		break;
 	case XDP_TX:
-		xdpf = xdp_convert_buff_to_frame(&xdp->base);
-		if (unlikely(!xdpf))
-			goto out_failure;
-		ring = ixgbe_determine_xdp_ring(adapter);
-		if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-			spin_lock(&ring->tx_lock);
-		result = ixgbe_xmit_xdp_ring(ring, xdpf);
-		if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-			spin_unlock(&ring->tx_lock);
-		if (result == IXGBE_XDP_CONSUMED)
-			goto out_failure;
+		result = IXGBE_XDP_TX;
+		if (!libeth_xdp_tx_queue_bulk(tx_bulk, xdp,
+					      ixgbe_xdp_flush_tx))
+			result = IXGBE_XDP_CONSUMED;
 		break;
 	case XDP_REDIRECT:
 		err = xdp_do_redirect(adapter->netdev, &xdp->base, xdp_prog);
@@ -2041,12 +2195,21 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 	unsigned int mss = 0;
 #endif /* IXGBE_FCOE */
 	u16 cleaned_count = ixgbe_desc_unused(rx_ring);
+	u32 rsc_append_cnt = 0;
+
+	LIBETH_XDP_ONSTACK_BULK(xdp_tx_bulk);
 	LIBETH_XDP_ONSTACK_BUFF(xdp);
 	unsigned int xdp_xmit = 0;
-	u32 rsc_append_cnt = 0;
+	u32 cached_ntu;
 	int xdp_res = 0;
 
 	libeth_xdp_init_buff(xdp, &rx_ring->xdp_stash, &rx_ring->xdp_rxq);
+	libeth_xdp_tx_init_bulk(&xdp_tx_bulk, rx_ring->xdp_prog,
+				adapter->netdev, adapter->xdp_ring,
+				adapter->num_xdp_queues);
+	if (xdp_tx_bulk.prog)
+		cached_ntu =
+			((struct ixgbe_ring *)xdp_tx_bulk.xdpsq)->next_to_use;
 
 	while (likely(total_rx_packets < budget)) {
 		union ixgbe_adv_rx_desc *rx_desc;
@@ -2080,11 +2243,12 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		    unlikely(!xdp->data))
 			continue;
 
-		xdp_res = ixgbe_run_xdp(adapter, rx_ring, xdp);
+		xdp_res = ixgbe_run_xdp(&xdp_tx_bulk, adapter, rx_ring, xdp);
 		if (xdp_res) {
 			if (xdp_res & (IXGBE_XDP_TX | IXGBE_XDP_REDIR))
 				xdp_xmit |= xdp_res;
 
+			xdp->data = NULL;
 			total_rx_packets++;
 			total_rx_bytes += xdp_get_buff_len(&xdp->base);
 			rsc_append_cnt = 0;
@@ -2155,11 +2319,8 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 	if (xdp_xmit & IXGBE_XDP_REDIR)
 		xdp_do_flush();
 
-	if (xdp_xmit & IXGBE_XDP_TX) {
-		struct ixgbe_ring *ring = ixgbe_determine_xdp_ring(adapter);
-
-		ixgbe_xdp_ring_update_tail_locked(ring);
-	}
+	ixgbe_rx_finalize_xdp(&xdp_tx_bulk, xdp_xmit & IXGBE_XDP_TX,
+			       cached_ntu);
 
 	ixgbe_update_rx_ring_stats(rx_ring, q_vector, total_rx_packets,
 				   total_rx_bytes);
@@ -3111,9 +3272,13 @@ int ixgbe_poll(struct napi_struct *napi, int budget)
 #endif
 
 	ixgbe_for_each_ring(ring, q_vector->tx) {
-		bool wd = ring->xsk_pool ?
-			  ixgbe_clean_xdp_tx_irq(q_vector, ring, budget) :
-			  ixgbe_clean_tx_irq(q_vector, ring, budget);
+		bool wd;
+
+		if (ring_is_xdp(ring) && !ring->xsk_pool)
+			continue;
+		wd = ring->xsk_pool ?
+		     ixgbe_clean_xdp_tx_irq(q_vector, ring, budget) :
+		     ixgbe_clean_tx_irq(q_vector, ring, budget);
 
 		if (!wd)
 			clean_complete = false;
@@ -3490,10 +3655,20 @@ void ixgbe_configure_tx_ring(struct ixgbe_adapter *adapter,
 	}
 
 	clear_bit(__IXGBE_HANG_CHECK_ARMED, &ring->state);
+	clear_bit(__IXGBE_TX_XDP_RING_PRIMED, &ring->state);
 
 	/* reinitialize tx_buffer_info */
-	memset(ring->tx_buffer_info, 0,
-		   sizeof(struct ixgbe_tx_buffer) * ring->count);
+	if (!ring_is_xdp(ring))
+		memset(ring->tx_buffer_info, 0,
+		       sizeof(struct ixgbe_tx_buffer) * ring->count);
+	else
+		memset(ring->xdp_sqes, 0,
+		       max(sizeof(struct ixgbe_tx_buffer),
+			   sizeof(struct libeth_sqe)) * ring->count);
+
+	ring->next_to_use = 0;
+	ring->next_to_clean = 0;
+	ring->pending = 0;
 
 	/* enable queue */
 	IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(reg_idx), txdctl);
@@ -6013,10 +6188,7 @@ static void ixgbe_clean_tx_ring(struct ixgbe_ring *tx_ring)
 		union ixgbe_adv_tx_desc *eop_desc, *tx_desc;
 
 		/* Free all the Tx ring sk_buffs */
-		if (ring_is_xdp(tx_ring))
-			xdp_return_frame(tx_buffer->xdpf);
-		else
-			dev_kfree_skb_any(tx_buffer->skb);
+		dev_kfree_skb_any(tx_buffer->skb);
 
 		/* unmap skb header data */
 		dma_unmap_single(tx_ring->dev,
@@ -6057,8 +6229,7 @@ static void ixgbe_clean_tx_ring(struct ixgbe_ring *tx_ring)
 	}
 
 	/* reset BQL for queue */
-	if (!ring_is_xdp(tx_ring))
-		netdev_tx_reset_queue(txring_txq(tx_ring));
+	netdev_tx_reset_queue(txring_txq(tx_ring));
 
 out:
 	/* reset next_to_use and next_to_clean */
@@ -6089,7 +6260,7 @@ static void ixgbe_clean_all_tx_rings(struct ixgbe_adapter *adapter)
 	for (i = 0; i < adapter->num_tx_queues; i++)
 		ixgbe_clean_tx_ring(adapter->tx_ring[i]);
 	for (i = 0; i < adapter->num_xdp_queues; i++)
-		ixgbe_clean_tx_ring(adapter->xdp_ring[i]);
+		ixgbe_clean_xdp_ring(adapter->xdp_ring[i]);
 }
 
 static void ixgbe_fdir_filter_exit(struct ixgbe_adapter *adapter)
@@ -6488,7 +6659,9 @@ int ixgbe_setup_tx_resources(struct ixgbe_ring *tx_ring)
 	int ring_node = NUMA_NO_NODE;
 	int size;
 
-	size = sizeof(struct ixgbe_tx_buffer) * tx_ring->count;
+	size = (!ring_is_xdp(tx_ring) ? sizeof(struct ixgbe_tx_buffer) :
+		max(sizeof(struct ixgbe_tx_buffer),
+		    sizeof(struct libeth_sqe))) * tx_ring->count;
 
 	if (tx_ring->q_vector)
 		ring_node = tx_ring->q_vector->numa_node;
@@ -6696,7 +6869,10 @@ err_setup_rx:
  **/
 void ixgbe_free_tx_resources(struct ixgbe_ring *tx_ring)
 {
-	ixgbe_clean_tx_ring(tx_ring);
+	if (!ring_is_xdp(tx_ring))
+		ixgbe_clean_tx_ring(tx_ring);
+	else
+		ixgbe_clean_xdp_ring(tx_ring);
 
 	vfree(tx_ring->tx_buffer_info);
 	tx_ring->tx_buffer_info = NULL;

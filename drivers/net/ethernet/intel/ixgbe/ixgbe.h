@@ -250,6 +250,7 @@ enum ixgbe_ring_state_t {
 	__IXGBE_TX_DETECT_HANG,
 	__IXGBE_HANG_CHECK_ARMED,
 	__IXGBE_TX_XDP_RING,
+	__IXGBE_TX_XDP_RING_PRIMED,
 	__IXGBE_TX_DISABLED,
 };
 
@@ -285,20 +286,24 @@ struct ixgbe_ring {
 	struct net_device *netdev;	/* netdev ring belongs to */
 	struct bpf_prog __rcu *xdp_prog;
 	union {
-		struct page_pool *pp;	/* Rx ring */
+		struct page_pool *pp;	/* Rx and XDP rings */
 		struct device *dev;	/* Tx ring */
 	};
 	void *desc;			/* descriptor ring memory */
 	union {
+		u32 truesize;		/* Rx buffer full size */
+		u32 pending;		/* Sent-not-completed descriptors */
+	};
+	union {
 		struct libeth_fqe *rx_fqes;
 		struct ixgbe_xsk_rx_buffer *rx_xsk_buffer_info;
 		struct ixgbe_tx_buffer *tx_buffer_info;
+		struct libeth_sqe *xdp_sqes;
 	};
 	unsigned long state;
 	u8 __iomem *tail;
 	dma_addr_t dma;			/* phys. address of descriptor ring */
 	unsigned int size;		/* length in bytes */
-	u32 truesize;
 
 	u16 count;			/* amount of descriptors */
 
@@ -308,8 +313,8 @@ struct ixgbe_ring {
 					 * associated with this ring, which is
 					 * different for DCB and RSS modes
 					 */
-	u16 next_to_use;
 	u16 next_to_clean;
+	u32 next_to_use;
 
 	unsigned long last_rx_timestamp;
 
