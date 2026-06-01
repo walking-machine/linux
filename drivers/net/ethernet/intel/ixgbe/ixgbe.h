@@ -331,6 +331,8 @@ struct ixgbe_ring {
 		struct ixgbe_rx_queue_stats rx_stats;
 	};
 	struct xdp_rxq_info xdp_rxq;
+	struct libeth_xdpsq_lock xdpq_lock;
+	u32 cached_ntu;
 	spinlock_t tx_lock;	/* used in XDP mode */
 	struct xsk_buff_pool *xsk_pool;
 	u16 ring_idx;		/* {rx,tx,xdp}_ring back reference idx */
@@ -365,8 +367,6 @@ enum ixgbe_ring_f_enum {
 #define IXGBE_MAX_TX_QUEUES		128
 #define IXGBE_MAX_TX_DESCRIPTORS	40
 #define IXGBE_MAX_TX_VF_HANGS		4
-
-DECLARE_STATIC_KEY_FALSE(ixgbe_xdp_locking_key);
 
 struct ixgbe_ring_feature {
 	u16 limit;	/* upper limit on feature indices */
@@ -766,10 +766,7 @@ static inline struct ixgbe_adapter *ixgbe_from_netdev(struct net_device *netdev)
 
 static inline int ixgbe_determine_xdp_q_idx(int cpu)
 {
-	if (static_key_enabled(&ixgbe_xdp_locking_key))
-		return cpu % IXGBE_MAX_XDP_QS;
-	else
-		return cpu;
+	return cpu % IXGBE_MAX_XDP_QS;
 }
 
 static inline

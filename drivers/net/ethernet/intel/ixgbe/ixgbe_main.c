@@ -179,9 +179,6 @@ MODULE_IMPORT_NS("LIBETH");
 MODULE_IMPORT_NS("LIBETH_XDP");
 MODULE_LICENSE("GPL v2");
 
-DEFINE_STATIC_KEY_FALSE(ixgbe_xdp_locking_key);
-EXPORT_SYMBOL(ixgbe_xdp_locking_key);
-
 static struct workqueue_struct *ixgbe_wq;
 
 static bool ixgbe_check_cfg_remove(struct ixgbe_hw *hw, struct pci_dev *pdev);
@@ -2012,12 +2009,14 @@ static u16 ixgbe_tx_get_num_sent(struct ixgbe_ring *xdp_ring)
 static void ixgbe_clean_xdp_ring(struct ixgbe_ring *xdp_ring)
 {
 	ixgbe_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
+	libeth_xdpsq_put(&xdp_ring->xdpq_lock, xdp_ring->netdev);
 }
 
 static u32 ixgbe_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 {
 	struct ixgbe_ring *xdp_ring = xdpsq;
 
+	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
 	if (unlikely(ixgbe_desc_unused(xdp_ring) < LIBETH_XDP_TX_BULK)) {
 		u16 to_clean = ixgbe_tx_get_num_sent(xdp_ring);
 
@@ -2051,7 +2050,7 @@ static u32 ixgbe_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 	*sq = (struct libeth_xdpsq) {
 		.count = xdp_ring->count,
 		.descs = xdp_ring->desc,
-		.lock = NULL,
+		.lock = &xdp_ring->xdpq_lock,
 		.ntu = &xdp_ring->next_to_use,
 		.pending = &xdp_ring->pending,
 		.pool = NULL,
@@ -2077,8 +2076,13 @@ static void ixgbe_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 		cmd_type |= IXGBE_TXD_CMD_EOP;
 
 	if (desc.flags & LIBETH_XDP_TX_FIRST) {
-		struct skb_shared_info *sinfo = sq->sqes[i].sinfo;
-		u16 full_len = desc.len + sinfo->xdp_frags_size;
+		struct libeth_sqe *sqe = &sq->sqes[i];
+		struct skb_shared_info *sinfo;
+		u16 full_len;
+
+		sinfo = sqe->type == LIBETH_SQE_XDP_TX ? sqe->sinfo :
+				     xdp_get_shared_info_from_frame(sqe->xdpf);
+		full_len = desc.len + sinfo->xdp_frags_size;
 
 		tx_desc->read.olinfo_status =
 			cpu_to_le32((full_len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
@@ -2089,87 +2093,36 @@ static void ixgbe_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
 }
 
-LIBETH_XDP_DEFINE_START();
-LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbe_xdp_flush_tx, ixgbe_prep_xdp_sq,
-			   ixgbe_xdp_xmit_desc);
-LIBETH_XDP_DEFINE_END();
-
-static void ixgbe_xdp_set_rs(struct ixgbe_ring *xdp_ring, u32 cached_ntu)
+static void ixgbe_xdp_rs_and_bump(void *xdpsq, bool sent, bool flush)
 {
-	u32 ltu = (xdp_ring->next_to_use ? : xdp_ring->count) - 1;
+	struct ixgbe_ring *xdp_ring = xdpsq;
 	union ixgbe_adv_tx_desc *desc;
+	u32 ltu;
 
+	if ((!flush && xdp_ring->pending < xdp_ring->count - 1) ||
+	    xdp_ring->cached_ntu == xdp_ring->next_to_use)
+		return;
+
+	ltu = (xdp_ring->next_to_use ? : xdp_ring->count) - 1;
 	desc = IXGBE_TX_DESC(xdp_ring, ltu);
-	xdp_ring->xdp_sqes[cached_ntu].rs_idx = ltu + 1;
+	xdp_ring->xdp_sqes[xdp_ring->cached_ntu].rs_idx = ltu + 1;
 	desc->read.cmd_type_len |= cpu_to_le32(IXGBE_TXD_CMD);
-}
-
-static void ixgbe_rx_finalize_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
-				  bool xdp_xmit, u32 cached_ntu)
-{
-	struct ixgbe_ring *xdp_ring = tx_bulk->xdpsq;
-
-	if (!xdp_xmit)
-		goto unlock;
-
-	if (tx_bulk->count)
-		ixgbe_xdp_flush_tx(tx_bulk, LIBETH_XDP_TX_DROP);
-
-	ixgbe_xdp_set_rs(xdp_ring, cached_ntu);
+	xdp_ring->cached_ntu = xdp_ring->next_to_use;
 
 	/* Finish descriptor writes before bumping tail */
 	wmb();
 	writel(xdp_ring->next_to_use, xdp_ring->tail);
-unlock:
-	rcu_read_unlock();
 }
 
-static int ixgbe_run_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
-			 struct ixgbe_adapter *adapter,
-			 struct ixgbe_ring *rx_ring,
-			 struct libeth_xdp_buff *xdp)
-{
-	int err, result = IXGBE_XDP_PASS;
-	const struct bpf_prog *xdp_prog;
-	u32 act;
-
-	xdp_prog = tx_bulk->prog;
-	if (!xdp_prog)
-		goto xdp_out;
-
-	prefetchw(xdp->base.data_hard_start); /* xdp_frame write */
-
-	act = bpf_prog_run_xdp(xdp_prog, &xdp->base);
-	switch (act) {
-	case XDP_PASS:
-		break;
-	case XDP_TX:
-		result = IXGBE_XDP_TX;
-		if (!libeth_xdp_tx_queue_bulk(tx_bulk, xdp,
-					      ixgbe_xdp_flush_tx))
-			result = IXGBE_XDP_CONSUMED;
-		break;
-	case XDP_REDIRECT:
-		err = xdp_do_redirect(adapter->netdev, &xdp->base, xdp_prog);
-		if (err)
-			goto out_failure;
-		result = IXGBE_XDP_REDIR;
-		break;
-	default:
-		bpf_warn_invalid_xdp_action(rx_ring->netdev, xdp_prog, act);
-		fallthrough;
-	case XDP_ABORTED:
-out_failure:
-		trace_xdp_exception(rx_ring->netdev, xdp_prog, act);
-		fallthrough; /* handle aborts by dropping packet */
-	case XDP_DROP:
-		result = IXGBE_XDP_CONSUMED;
-		libeth_xdp_return_buff(xdp);
-		break;
-	}
-xdp_out:
-	return result;
-}
+LIBETH_XDP_DEFINE_START();
+LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbe_xdp_flush_tx, ixgbe_prep_xdp_sq,
+			   ixgbe_xdp_xmit_desc);
+LIBETH_XDP_DEFINE_FLUSH_XMIT(static ixgbe_xdp_flush_xmit, ixgbe_prep_xdp_sq,
+			     ixgbe_xdp_xmit_desc);
+LIBETH_XDP_DEFINE_RUN_PROG(static ixgbe_xdp_run_prog, ixgbe_xdp_flush_tx);
+LIBETH_XDP_DEFINE_FINALIZE(static ixgbe_xdp_finalize_xdp_napi,
+			   ixgbe_xdp_flush_tx, ixgbe_xdp_rs_and_bump);
+LIBETH_XDP_DEFINE_END();
 
 /**
  * ixgbe_clean_rx_irq - Clean completed descriptors from Rx ring - bounce buf
@@ -2199,17 +2152,11 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 
 	LIBETH_XDP_ONSTACK_BULK(xdp_tx_bulk);
 	LIBETH_XDP_ONSTACK_BUFF(xdp);
-	unsigned int xdp_xmit = 0;
-	u32 cached_ntu;
-	int xdp_res = 0;
 
 	libeth_xdp_init_buff(xdp, &rx_ring->xdp_stash, &rx_ring->xdp_rxq);
 	libeth_xdp_tx_init_bulk(&xdp_tx_bulk, rx_ring->xdp_prog,
 				adapter->netdev, adapter->xdp_ring,
 				adapter->num_xdp_queues);
-	if (xdp_tx_bulk.prog)
-		cached_ntu =
-			((struct ixgbe_ring *)xdp_tx_bulk.xdpsq)->next_to_use;
 
 	while (likely(total_rx_packets < budget)) {
 		union ixgbe_adv_rx_desc *rx_desc;
@@ -2243,11 +2190,8 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 		    unlikely(!xdp->data))
 			continue;
 
-		xdp_res = ixgbe_run_xdp(&xdp_tx_bulk, adapter, rx_ring, xdp);
-		if (xdp_res) {
-			if (xdp_res & (IXGBE_XDP_TX | IXGBE_XDP_REDIR))
-				xdp_xmit |= xdp_res;
-
+		if (xdp_tx_bulk.prog &&
+		    !ixgbe_xdp_run_prog(xdp, &xdp_tx_bulk)) {
 			xdp->data = NULL;
 			total_rx_packets++;
 			total_rx_bytes += xdp_get_buff_len(&xdp->base);
@@ -2316,11 +2260,7 @@ static int ixgbe_clean_rx_irq(struct ixgbe_q_vector *q_vector,
 	/* place incomplete frames back on ring for completion */
 	libeth_xdp_save_buff(&rx_ring->xdp_stash, xdp);
 
-	if (xdp_xmit & IXGBE_XDP_REDIR)
-		xdp_do_flush();
-
-	ixgbe_rx_finalize_xdp(&xdp_tx_bulk, xdp_xmit & IXGBE_XDP_TX,
-			       cached_ntu);
+	ixgbe_xdp_finalize_xdp_napi(&xdp_tx_bulk);
 
 	ixgbe_update_rx_ring_stats(rx_ring, q_vector, total_rx_packets,
 				   total_rx_bytes);
@@ -3658,17 +3598,21 @@ void ixgbe_configure_tx_ring(struct ixgbe_adapter *adapter,
 	clear_bit(__IXGBE_TX_XDP_RING_PRIMED, &ring->state);
 
 	/* reinitialize tx_buffer_info */
-	if (!ring_is_xdp(ring))
+	if (!ring_is_xdp(ring)) {
 		memset(ring->tx_buffer_info, 0,
 		       sizeof(struct ixgbe_tx_buffer) * ring->count);
-	else
+	} else {
 		memset(ring->xdp_sqes, 0,
 		       max(sizeof(struct ixgbe_tx_buffer),
 			   sizeof(struct libeth_sqe)) * ring->count);
+		libeth_xdpsq_get(&ring->xdpq_lock, ring->netdev,
+				 num_possible_cpus() > adapter->num_xdp_queues);
+	}
 
 	ring->next_to_use = 0;
 	ring->next_to_clean = 0;
 	ring->pending = 0;
+	ring->cached_ntu = 0;
 
 	/* enable queue */
 	IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(reg_idx), txdctl);
@@ -6638,10 +6582,6 @@ static int ixgbe_sw_init(struct ixgbe_adapter *adapter,
 	/* PF holds first pool slot */
 	set_bit(0, adapter->fwd_bitmask);
 	set_bit(__IXGBE_DOWN, &adapter->state);
-
-	/* enable locking for XDP_TX if we have more CPUs than queues */
-	if (nr_cpu_ids > IXGBE_MAX_XDP_QS)
-		static_branch_enable(&ixgbe_xdp_locking_key);
 
 	return 0;
 }
@@ -10617,20 +10557,15 @@ void ixgbe_xdp_ring_update_tail(struct ixgbe_ring *ring)
 
 void ixgbe_xdp_ring_update_tail_locked(struct ixgbe_ring *ring)
 {
-	if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-		spin_lock(&ring->tx_lock);
+	libeth_xdpsq_lock(&ring->xdpq_lock);
 	ixgbe_xdp_ring_update_tail(ring);
-	if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-		spin_unlock(&ring->tx_lock);
+	libeth_xdpsq_unlock(&ring->xdpq_lock);
 }
 
 static int ixgbe_xdp_xmit(struct net_device *dev, int n,
 			  struct xdp_frame **frames, u32 flags)
 {
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(dev);
-	struct ixgbe_ring *ring;
-	int nxmit = 0;
-	int i;
 
 	if (unlikely(test_bit(__IXGBE_DOWN, &adapter->state)))
 		return -ENETDOWN;
@@ -10639,39 +10574,14 @@ static int ixgbe_xdp_xmit(struct net_device *dev, int n,
 		!netif_running(adapter->netdev))
 		return -ENETDOWN;
 
-	if (unlikely(flags & ~XDP_XMIT_FLAGS_MASK))
-		return -EINVAL;
-
-	/* During program transitions its possible adapter->xdp_prog is assigned
-	 * but ring has not been configured yet. In this case simply abort xmit.
-	 */
-	ring = adapter->xdp_prog ? ixgbe_determine_xdp_ring(adapter) : NULL;
-	if (unlikely(!ring))
+	if (unlikely(!adapter->num_xdp_queues))
 		return -ENXIO;
 
-	if (unlikely(test_bit(__IXGBE_TX_DISABLED, &ring->state)))
-		return -ENXIO;
-
-	if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-		spin_lock(&ring->tx_lock);
-
-	for (i = 0; i < n; i++) {
-		struct xdp_frame *xdpf = frames[i];
-		int err;
-
-		err = ixgbe_xmit_xdp_ring(ring, xdpf);
-		if (err != IXGBE_XDP_TX)
-			break;
-		nxmit++;
-	}
-
-	if (unlikely(flags & XDP_XMIT_FLUSH))
-		ixgbe_xdp_ring_update_tail(ring);
-
-	if (static_branch_unlikely(&ixgbe_xdp_locking_key))
-		spin_unlock(&ring->tx_lock);
-
-	return nxmit;
+	return libeth_xdp_xmit_do_bulk(dev, n, frames, flags,
+				       adapter->xdp_ring,
+				       adapter->num_xdp_queues,
+				       ixgbe_xdp_flush_xmit,
+				       ixgbe_xdp_rs_and_bump);
 }
 
 static const struct net_device_ops ixgbe_netdev_ops = {
