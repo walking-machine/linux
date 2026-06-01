@@ -34,6 +34,7 @@
 
 #include <net/xdp.h>
 #include <net/libeth/rx.h>
+#include <net/libeth/types.h>
 
 /* common prefix used by pr_<> macros */
 #undef pr_fmt
@@ -327,12 +328,12 @@ struct ixgbe_ring {
 		struct ixgbe_tx_queue_stats tx_stats;
 		struct ixgbe_rx_queue_stats rx_stats;
 	};
-	struct sk_buff *skb;		/* partial Rx skb across non-EOP */
 	struct xdp_rxq_info xdp_rxq;
 	spinlock_t tx_lock;	/* used in XDP mode */
 	struct xsk_buff_pool *xsk_pool;
 	u16 ring_idx;		/* {rx,tx,xdp}_ring back reference idx */
 	u32 rx_buf_len;
+	struct libeth_xdp_buff_stash xdp_stash;
 } ____cacheline_internodealigned_in_smp;
 
 enum ixgbe_ring_f_enum {
