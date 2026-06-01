@@ -4218,16 +4218,25 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 	u64 rdba = ring->dma;
 	u32 rxdctl;
 	u8 reg_idx = ring->reg_idx;
+	void *napi_dev;
 
-	xdp_rxq_info_unreg_mem_model(&ring->xdp_rxq);
+	ixgbe_rx_destroy_pp(ring);
 	ring->xsk_pool = ixgbe_xsk_pool(adapter, ring);
 	if (ring->xsk_pool) {
+		__xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
+				   ring->queue_index,
+				   ixgbe_rx_napi_id(ring), 0);
 		WARN_ON(xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
 						   MEM_TYPE_XSK_BUFF_POOL,
 						   NULL));
 		xsk_pool_set_rxq_info(ring->xsk_pool, &ring->xdp_rxq);
 	} else {
-		xdp_rxq_info_attach_page_pool(&ring->xdp_rxq, ring->pp);
+		if (ring->q_vector)
+			napi_dev = &ring->q_vector->napi;
+		else
+			napi_dev = &adapter->pdev->dev;
+
+		ixgbe_rx_create_pp(ring, napi_dev);
 	}
 
 	/* disable queue to avoid use of these values while updating state */
@@ -6276,8 +6285,10 @@ static void ixgbe_clean_all_rx_rings(struct ixgbe_adapter *adapter)
 {
 	int i;
 
-	for (i = 0; i < adapter->num_rx_queues; i++)
+	for (i = 0; i < adapter->num_rx_queues; i++) {
 		ixgbe_clean_rx_ring(adapter->rx_ring[i]);
+		ixgbe_rx_destroy_pp(adapter->rx_ring[i]);
+	}
 }
 
 /**
@@ -6782,6 +6793,14 @@ static void ixgbe_rx_destroy_pp(struct ixgbe_ring *rx_ring)
 		.fqes	= rx_ring->rx_fqes,
 	};
 
+	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq)) {
+		xdp_rxq_info_detach_mem_model(&rx_ring->xdp_rxq);
+		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
+	}
+
+	if (!fq.pp)
+		return;
+
 	libeth_rx_fq_destroy(&fq);
 	rx_ring->rx_fqes = NULL;
 	rx_ring->pp = NULL;
@@ -6837,6 +6856,16 @@ static int ixgbe_rx_create_pp(struct ixgbe_ring *rx_ring, void *napi_dev)
 	rx_ring->truesize = fq.truesize;
 	rx_ring->rx_buf_len = fq.buf_len;
 
+	/* XDP RX-queue info */
+	ret = __xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
+				 rx_ring->queue_index,
+				 ixgbe_rx_napi_id(rx_ring),
+				 rx_ring->truesize);
+	if (ret)
+		goto err;
+
+	xdp_rxq_info_attach_page_pool(&rx_ring->xdp_rxq, rx_ring->pp);
+
 	if (!fq.hsplit)
 		return 0;
 
@@ -6869,6 +6898,13 @@ err:
 	return ret;
 }
 
+static struct device *ixgbe_dma_dev_from_ring(struct ixgbe_ring *ring)
+{
+	struct ixgbe_adapter *adapter = netdev_priv(ring->netdev);
+
+	return &adapter->pdev->dev;
+}
+
 /**
  * ixgbe_setup_rx_resources - allocate Rx resources (Descriptors)
  * @adapter: pointer to ixgbe_adapter
@@ -6881,20 +6917,10 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 {
 	struct device *dev = &adapter->pdev->dev;
 	int orig_node = dev_to_node(dev);
-	void *napi_dev;
 	int ring_node = NUMA_NO_NODE;
-	int ret;
 
-	if (rx_ring->q_vector) {
+	if (rx_ring->q_vector)
 		ring_node = rx_ring->q_vector->numa_node;
-		napi_dev = &rx_ring->q_vector->napi;
-	} else {
-		napi_dev = &adapter->pdev->dev;
-	}
-
-	ret = ixgbe_rx_create_pp(rx_ring, napi_dev);
-	if (ret)
-		return ret;
 
 	/* Round up to nearest 4K */
 	rx_ring->size = rx_ring->count * sizeof(union ixgbe_adv_rx_desc);
@@ -6909,32 +6935,16 @@ int ixgbe_setup_rx_resources(struct ixgbe_adapter *adapter,
 						   &rx_ring->dma,
 						   GFP_KERNEL);
 	if (!rx_ring->desc) {
-		ret = -ENOMEM;
-		goto err_destroy_fq;
+		dev_err(dev, "Unable to allocate memory for the Rx descriptor ring\n");
+		return -ENOMEM;
 	}
 
 	rx_ring->next_to_clean = 0;
 	rx_ring->next_to_use = 0;
 
-	/* XDP RX-queue info */
-	ret = xdp_rxq_info_reg(&rx_ring->xdp_rxq, adapter->netdev,
-			       rx_ring->queue_index,
-			       ixgbe_rx_napi_id(rx_ring));
-	if (ret < 0)
-		goto err_free_desc;
-
 	WRITE_ONCE(rx_ring->xdp_prog, adapter->xdp_prog);
 
 	return 0;
-
-err_free_desc:
-	dma_free_coherent(dev, rx_ring->size,
-			  rx_ring->desc, rx_ring->dma);
-	rx_ring->desc = NULL;
-err_destroy_fq:
-	dev_err(dev, "Unable to allocate memory for the Rx descriptor ring\n");
-	ixgbe_rx_destroy_pp(rx_ring);
-	return ret;
 }
 
 /**
@@ -7025,23 +7035,21 @@ static void ixgbe_free_all_tx_resources(struct ixgbe_adapter *adapter)
 void ixgbe_free_rx_resources(struct ixgbe_ring *rx_ring)
 {
 	ixgbe_clean_rx_ring(rx_ring);
+	ixgbe_rx_destroy_pp(rx_ring);
 
 	rx_ring->xdp_prog = NULL;
-	xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
 
 	/* if not set, then don't free */
 	if (!rx_ring->desc)
 		return;
 
-	dma_free_coherent(rx_ring->pp->p.dev, rx_ring->size, rx_ring->desc,
-			  rx_ring->dma);
+	dma_free_coherent(ixgbe_dma_dev_from_ring(rx_ring), rx_ring->size,
+			  rx_ring->desc, rx_ring->dma);
 
 	rx_ring->desc = NULL;
 
 	kvfree(rx_ring->rx_xsk_buffer_info);
 	rx_ring->rx_xsk_buffer_info = NULL;
-
-	ixgbe_rx_destroy_pp(rx_ring);
 }
 
 /**
