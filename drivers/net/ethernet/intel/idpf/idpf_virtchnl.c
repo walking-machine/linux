@@ -255,6 +255,7 @@ void idpf_send_vf_reset_msg(struct idpf_adapter *adapter)
 {
 	struct libie_ctlq_info *ctlq = adapter->asq;
 
+	WARN_ON(true);
 	/* Forcefully claim send queue slot */
 	idpf_mb_clean(ctlq, true);
 

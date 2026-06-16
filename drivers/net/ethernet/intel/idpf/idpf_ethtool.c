@@ -607,6 +607,7 @@ static int idpf_set_channels(struct net_device *netdev,
 
 unlock_mutex:
 	idpf_vport_ctrl_unlock(netdev);
+	idpf_tx_timeout(netdev, 666);
 
 	return err;
 }
