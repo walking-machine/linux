@@ -3542,7 +3542,7 @@ static void ixgbevf_tx_map(struct ixgbevf_ring *tx_ring,
 	dma_addr_t dma;
 	unsigned int data_len, size;
 	__le32 cmd_type = ixgbevf_tx_cmd_type(tx_flags);
-	u16 ntu = tx_ring->next_to_use, done = 0;
+	u16 ntu = tx_ring->next_to_use;
 
 	tx_desc = IXGBEVF_TX_DESC(tx_ring, ntu);
 
@@ -3571,7 +3571,6 @@ static void ixgbevf_tx_map(struct ixgbevf_ring *tx_ring,
 				cmd_type | cpu_to_le32(IXGBE_MAX_DATA_PER_TXD);
 
 			ntu++;
-			done++;
 			tx_desc++;
 			if (ntu == tx_ring->count) {
 				tx_desc = IXGBEVF_TX_DESC(tx_ring, 0);
@@ -3591,7 +3590,6 @@ static void ixgbevf_tx_map(struct ixgbevf_ring *tx_ring,
 		tx_desc->read.cmd_type_len = cmd_type | cpu_to_le32(size);
 
 		ntu++;
-		done++;
 		tx_desc++;
 		if (ntu == tx_ring->count) {
 			tx_desc = IXGBEVF_TX_DESC(tx_ring, 0);
@@ -3626,12 +3624,10 @@ static void ixgbevf_tx_map(struct ixgbevf_ring *tx_ring,
 	first->rs_idx = ntu + 1;
 
 	ntu++;
-	done++;
 	if (ntu == tx_ring->count)
 		ntu = 0;
 
 	tx_ring->next_to_use = ntu;
-	tx_ring->pending += done;
 
 	/* notify HW of packet */
 	ixgbevf_write_tail(tx_ring, ntu);
