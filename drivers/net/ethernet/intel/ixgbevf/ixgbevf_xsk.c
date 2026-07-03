@@ -37,6 +37,8 @@ static void ixgbevf_qp_dis(struct ixgbevf_adapter *adapter, u16 qid)
 	ixgbevf_single_irq_disable(adapter, q_vector->v_idx);
 	napi_disable(&q_vector->napi);
 
+	synchronize_net();
+
 	ixgbevf_disable_rx_queue(adapter, adapter->rx_ring[qid]);
 	ixgbevf_clean_rx_ring(rx_ring);
 	ixgbevf_rx_destroy_pp(rx_ring);
