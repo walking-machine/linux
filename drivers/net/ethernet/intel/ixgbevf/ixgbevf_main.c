@@ -265,6 +265,47 @@ static void ixgbevf_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 	ixgbevf_tx_timeout_reset(adapter);
 }
 
+static u16 ixgbevf_clean_tx_num(struct ixgbevf_ring *tx_ring, bool in_napi,
+				 u16 to_clean,
+				 struct libeth_sq_napi_stats *stats,
+				 u16 *total_ipsec)
+{
+	bool xsk_ring = ring_is_xsk(tx_ring);
+	u16 ntc = tx_ring->next_to_clean;
+	struct xdp_frame_bulk xdp_bulk;
+	struct libeth_cq_pp cq = {
+		.ss = stats,
+		.dev = tx_ring->dev,
+		.napi = in_napi,
+		.bq = &xdp_bulk,
+	};
+	u32 xsk_frames = 0;
+
+	xdp_frame_bulk_init(&xdp_bulk);
+	for (int i = 0; i < to_clean; i++) {
+		struct ixgbevf_skb_sqe_priv *priv;
+		struct libeth_sqe *sqe;
+
+		sqe = &tx_ring->tx_sqes[ntc];
+		priv = (void *)&sqe->priv;
+		if (priv->tx_flags & IXGBE_TX_FLAGS_IPSEC &&
+		    likely(total_ipsec))
+			(*total_ipsec)++;
+
+		xsk_frames += xsk_ring && !sqe->type ? 1 : 0;
+		libeth_tx_complete_any(sqe, &cq);
+
+		if (unlikely(++ntc == tx_ring->count))
+			ntc = 0;
+	}
+
+	xdp_flush_frame_bulk(&xdp_bulk);
+	if (xsk_frames)
+		xsk_tx_completed(tx_ring->xsk_pool, xsk_frames);
+
+	return ntc;
+}
+
 /**
  * ixgbevf_clean_tx_irq - Reclaim resources after transmit completes
  * @q_vector: board private structure
@@ -274,42 +315,18 @@ static void ixgbevf_tx_timeout(struct net_device *netdev, unsigned int txqueue)
 static bool ixgbevf_clean_tx_irq(struct ixgbevf_q_vector *q_vector,
 				 struct ixgbevf_ring *tx_ring, int napi_budget)
 {
-	u16 budget = tx_ring->count / 2, to_clean, ntc = tx_ring->next_to_clean;
 	struct ixgbevf_adapter *adapter = q_vector->adapter;
+	u16 budget = tx_ring->count / 2, to_clean, ntc;
 	struct libeth_sq_napi_stats stats = { };
-	struct xdp_frame_bulk xdp_bulk;
-	unsigned int total_ipsec = 0;
-	struct libeth_cq_pp cq = {
-		.ss = &stats,
-		.dev = tx_ring->dev,
-		.napi = true,
-		.bq = &xdp_bulk,
-	};
+	u16 total_ipsec;
 
 	if (test_bit(__IXGBEVF_DOWN, &adapter->state))
 		return true;
 
-	xdp_frame_bulk_init(&xdp_bulk);
-
 	to_clean = ixgbevf_desc_used(tx_ring);
 	to_clean = ixgbevf_tx_get_num_sent(tx_ring, min_t(u16, budget, to_clean));
 	budget = budget > to_clean ? budget - to_clean : 0;
-
-	for (int i = 0; i < to_clean; i++) {
-		struct ixgbevf_skb_sqe_priv *priv;
-		struct libeth_sqe *sqe;
-
-		sqe = &tx_ring->tx_sqes[ntc];
-		priv = (void *)&sqe->priv;
-		if (priv->tx_flags & IXGBE_TX_FLAGS_IPSEC)
-			total_ipsec++;
-
-		libeth_tx_complete_any(sqe, &cq);
-
-		if (unlikely(++ntc == tx_ring->count))
-			ntc = 0;
-	}
-	xdp_flush_frame_bulk(&xdp_bulk);
+	ntc = ixgbevf_clean_tx_num(tx_ring, true, to_clean, &stats, &total_ipsec);
 
 	smp_wmb();
 
@@ -725,13 +742,13 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 	bool clean_complete = true;
 
 	ixgbevf_for_each_ring(ring, q_vector->tx) {
+		if (!ring_is_xdp(ring))
+			clean_complete &=
+				ixgbevf_clean_tx_irq(q_vector, ring, budget);
 		if (ring_is_xsk(ring))
 			clean_complete &=
 				ixgbevf_clean_xsk_tx_irq(q_vector, ring,
 							 budget);
-		else if (!ring_is_xdp(ring))
-			clean_complete &=
-				ixgbevf_clean_tx_irq(q_vector, ring, budget);
 	}
 
 	if (budget <= 0)
@@ -1139,10 +1156,12 @@ void ixgbevf_irq_enable(struct ixgbevf_adapter *adapter)
  */
 static struct xsk_buff_pool *ixgbevf_xsk_pool_from_q(struct ixgbevf_ring *ring)
 {
+	struct ixgbevf_adapter *adapter = ring->q_vector->adapter;
 	struct xsk_buff_pool *pool =
 		xsk_get_pool_from_qid(ring->netdev, ring->queue_index);
 
-	if (!READ_ONCE(ring->xdp_prog) && !ring_is_xdp(ring))
+	if (!rcu_dereference(ring->xdp_prog) && !ring_is_xdp(ring) &&
+	    !(adapter->xdp_prog && !adapter->num_xdp_queues))
 		return NULL;
 
 	return (pool && pool->dev) ? pool : NULL;
@@ -1210,7 +1229,8 @@ void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 				 num_possible_cpus() > adapter->num_xdp_queues);
 
 	ring->xsk_pool = ixgbevf_xsk_pool_from_q(ring);
-	if (ring_is_xdp(ring) && ring->xsk_pool)
+	if (adapter->xdp_prog &&
+	    (!adapter->num_xdp_queues || ring_is_xdp(ring)) && ring->xsk_pool)
 		set_ring_xsk(ring);
 	else
 		clear_ring_xsk(ring);
@@ -2028,29 +2048,9 @@ reset:
 void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring)
 {
 	struct libeth_sq_napi_stats stats = { };
-	u16 ntc = tx_ring->next_to_clean;
-	struct xdp_frame_bulk xdp_bulk;
-	struct libeth_cq_pp cq = {
-		.dev = tx_ring->dev,
-		.ss = &stats,
-		.bq = &xdp_bulk,
-	};
 
-	xdp_frame_bulk_init(&xdp_bulk);
-
-	tx_ring->pending = ixgbevf_desc_used(tx_ring);
-
-	for (int i = 0; i < tx_ring->pending; i++) {
-		struct libeth_sqe *sqe;
-
-		sqe = &tx_ring->tx_sqes[ntc];
-
-		libeth_tx_complete_any(sqe, &cq);
-
-		if (unlikely(++ntc == tx_ring->count))
-			ntc = 0;
-	}
-	xdp_flush_frame_bulk(&xdp_bulk);
+	ixgbevf_clean_tx_num(tx_ring, false, ixgbevf_desc_used(tx_ring),
+			     &stats, NULL);
 
 	/* reset next_to_use and next_to_clean */
 	tx_ring->next_to_use = 0;

@@ -187,7 +187,7 @@ static inline u32 ixgbevf_prep_tx_sq(void *xdpsq, struct libeth_xdpsq *sq)
 		.ntu = &tx_ring->next_to_use,
 		/* This value is ignored in shared queues */
 		.pending = &tx_ring->pending,
-		.pool = NULL,
+		.pool = tx_ring->xsk_pool,
 		.sqes = tx_ring->xdp_sqes,
 	};
 
