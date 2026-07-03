@@ -300,6 +300,8 @@ __libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
 		xsk_clear_tx_need_wakeup(pool);
 
 	n = xsk_tx_peek_release_desc_batch(pool, budget);
+	if (unlikely(!n))
+		return true;
 	bulk = container_of(&pool->tx_descs[0], typeof(*bulk), desc);
 
 	libeth_xdp_tx_xmit_bulk(bulk, xdpsq, n, true,
