@@ -916,6 +916,75 @@ static int ixgbevf_get_rxfh(struct net_device *netdev,
 	return err;
 }
 
+static void ixgbevf_get_reported_q_num(u32 rx, u32 tx, u32 *dst_combined,
+				       u32 *dst_rx, u32 *dst_tx)
+{
+	rx = min_t(u32, rx, num_online_cpus());
+	*dst_combined = min_t(u32, rx, tx);
+	if (rx > tx) {
+		*dst_rx = rx - tx;
+		*dst_tx = 0;
+	} else {
+		*dst_tx = tx - rx;
+		*dst_rx = 0;
+	}
+}
+
+static void ixgbevf_get_channels(struct net_device *netdev,
+				 struct ethtool_channels *ch)
+{
+	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
+
+	ixgbevf_get_reported_q_num(adapter->num_rx_queues,
+				   adapter->num_tx_queues,
+				   &ch->combined_count, &ch->rx_count,
+				   &ch->tx_count);
+
+	ixgbevf_get_reported_q_num(adapter->q_caps.max_rxqs,
+				   adapter->q_caps.max_txqs,
+				   &ch->max_combined, &ch->max_rx,
+				   &ch->max_tx);
+
+	ch->max_other = NON_Q_VECTORS;
+	ch->other_count = NON_Q_VECTORS;
+}
+
+static int ixgbevf_set_channels(struct net_device *netdev,
+				struct ethtool_channels *ch)
+{
+	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
+	u32 num_req = ch->combined_count;
+	bool was_up;
+	int err = 0;
+
+	/* Do not change queue number if DCB is enabled */
+	if (adapter->q_caps.num_tcs > 1)
+		return -EOPNOTSUPP;
+
+	if (ch->rx_count || ch->tx_count || ch->other_count != NON_Q_VECTORS)
+		return -EINVAL;
+
+	if (num_req == adapter->num_rx_queues &&
+	    num_req == adapter->num_tx_queues)
+		return 0;
+
+	adapter->num_req_qpairs = num_req;
+
+	was_up = netif_running(netdev);
+	if (was_up)
+		ixgbevf_close(netdev);
+
+	ixgbevf_clear_interrupt_scheme(adapter);
+	err = ixgbevf_init_interrupt_scheme(adapter);
+	if (err)
+		return err;
+
+	if (was_up)
+		ixgbevf_open(netdev);
+
+	return 0;
+}
+
 static const struct ethtool_ops ixgbevf_ethtool_ops = {
 	.supported_coalesce_params = ETHTOOL_COALESCE_USECS,
 	.get_drvinfo		= ixgbevf_get_drvinfo,
@@ -938,6 +1007,8 @@ static const struct ethtool_ops ixgbevf_ethtool_ops = {
 	.get_rxfh_key_size	= ixgbevf_get_rxfh_key_size,
 	.get_rxfh		= ixgbevf_get_rxfh,
 	.get_link_ksettings	= ixgbevf_get_link_ksettings,
+	.get_channels		= ixgbevf_get_channels,
+	.set_channels		= ixgbevf_set_channels,
 };
 
 void ixgbevf_set_ethtool_ops(struct net_device *netdev)

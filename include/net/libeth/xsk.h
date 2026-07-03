@@ -146,9 +146,10 @@ libeth_xsk_tx_fill_buf(struct libeth_xdp_tx_frame frm, u32 i,
  * Use via LIBETH_XSK_DEFINE_FLUSH_TX() to define an XSk ``XDP_TX`` driver
  * callback.
  */
-#define libeth_xsk_tx_flush_bulk(bq, flags, prep, xmit)			     \
+#define libeth_xsk_tx_flush_bulk(bq, flags, prep, xmit, unprep)		     \
 	__libeth_xdp_tx_flush_bulk(bq, (flags) | LIBETH_XDP_TX_XSK, prep,    \
-				   libeth_xsk_tx_fill_buf, xmit)
+				   libeth_xsk_tx_fill_buf, xmit,	     \
+				   unprep)
 
 /* XSk TMO */
 
@@ -282,12 +283,13 @@ libeth_xsk_xmit_fill_buf(struct libeth_xdp_tx_frame frm, u32 i,
  * Return: false if @budget was exhausted, true otherwise.
  */
 static __always_inline bool
-libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
-			const struct xsk_tx_metadata_ops *tmo,
-			u32 (*prep)(void *xdpsq, struct libeth_xdpsq *sq),
-			void (*xmit)(struct libeth_xdp_tx_desc desc, u32 i,
-				     const struct libeth_xdpsq *sq, u64 priv),
-			void (*finalize)(void *xdpsq, bool sent, bool flush))
+__libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
+			  const struct xsk_tx_metadata_ops *tmo,
+			  u32 (*prep)(void *xdpsq, struct libeth_xdpsq *sq),
+			  void (*xmit)(struct libeth_xdp_tx_desc desc, u32 i,
+				       const struct libeth_xdpsq *sq, u64 priv),
+			  void (*finalize)(void *xdpsq, bool sent, bool flush),
+			  void (*unprep)(void *xdpsq, struct libeth_xdpsq *sq))
 {
 	const struct libeth_xdp_tx_frame *bulk;
 	bool wake;
@@ -298,11 +300,14 @@ libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
 		xsk_clear_tx_need_wakeup(pool);
 
 	n = xsk_tx_peek_release_desc_batch(pool, budget);
+	if (unlikely(!n))
+		return true;
 	bulk = container_of(&pool->tx_descs[0], typeof(*bulk), desc);
 
 	libeth_xdp_tx_xmit_bulk(bulk, xdpsq, n, true,
 				libeth_xdp_ptr_to_priv(tmo), prep,
-				libeth_xsk_xmit_fill_buf, xmit);
+				libeth_xsk_xmit_fill_buf, xmit,
+				unprep);
 	finalize(xdpsq, n, true);
 
 	if (wake)
@@ -310,6 +315,10 @@ libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
 
 	return n < budget;
 }
+
+#define libeth_xsk_xmit_do_bulk(pool, xdpsq, budget, tmo, prep, xmit, finalize)\
+	__libeth_xsk_xmit_do_bulk(pool, xdpsq, budget, tmo, prep, xmit,	       \
+				  finalize, libeth_xdp_tx_unprep)
 
 /* Rx polling path */
 
@@ -327,7 +336,11 @@ libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
  * when hitting this path.
  */
 #define libeth_xsk_tx_init_bulk(bq, prog, dev, xdpsqs, num)		     \
-	__libeth_xdp_tx_init_bulk(bq, prog, dev, xdpsqs, num, true,	     \
+	__libeth_xdp_tx_init_bulk(bq, prog, dev, xdpsqs, num, true, false,   \
+				  __UNIQUE_ID(bq_), __UNIQUE_ID(nqs_))
+
+#define libeth_xsk_tx_init_bulk_shared(bq, prog, dev, xdpsqs, num)	     \
+	__libeth_xdp_tx_init_bulk(bq, prog, dev, xdpsqs, num, true, true,    \
 				  __UNIQUE_ID(bq_), __UNIQUE_ID(nqs_))
 
 struct libeth_xdp_buff *libeth_xsk_buff_add_frag(struct libeth_xdp_buff *head,
@@ -546,7 +559,8 @@ __libeth_xsk_run_pass(struct libeth_xdp_buff *xdp,
  * @xmit: driver callback to write a HW Tx descriptor
  */
 #define LIBETH_XSK_DEFINE_FLUSH_TX(name, prep, xmit)			     \
-	__LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, xsk)
+	__LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, libeth_xdp_tx_unprep, \
+				     xsk)
 
 /**
  * LIBETH_XSK_DEFINE_RUN_PROG - define a driver XDP program run function

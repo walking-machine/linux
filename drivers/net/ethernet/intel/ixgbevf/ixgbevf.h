@@ -11,7 +11,7 @@
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/u64_stats_sync.h>
-#include <net/libeth/types.h>
+#include <net/libeth/tx.h>
 #include <net/xdp.h>
 
 #include "vf.h"
@@ -24,24 +24,12 @@
 #define TXD_USE_COUNT(S) DIV_ROUND_UP((S), IXGBE_MAX_DATA_PER_TXD)
 #define DESC_NEEDED (MAX_SKB_FRAGS + 4)
 
-/* wrapper around a pointer to a socket buffer,
- * so a DMA handle can be stored along with the buffer
- */
-struct ixgbevf_tx_buffer {
-	union ixgbe_adv_tx_desc *next_to_watch;
-	unsigned long time_stamp;
-	union {
-		struct sk_buff *skb;
-		/* XDP uses address ptr on irq_clean */
-		void *data;
-	};
-	unsigned int bytecount;
-	unsigned short gso_segs;
-	__be16 protocol;
-	DEFINE_DMA_UNMAP_ADDR(dma);
-	DEFINE_DMA_UNMAP_LEN(len);
+struct ixgbevf_skb_sqe_priv {
 	u32 tx_flags;
+	__be16 protocol;
 };
+static_assert(sizeof(struct ixgbevf_skb_sqe_priv) <=
+	      sizeof(typeof_member(struct libeth_sqe, priv)));
 
 struct ixgbevf_stats {
 	u64 packets;
@@ -103,7 +91,7 @@ struct ixgbevf_ring {
 	union {
 		struct libeth_fqe *rx_fqes;
 		struct libeth_xdp_buff	**xsk_fqes;
-		struct ixgbevf_tx_buffer *tx_buffer_info;
+		struct libeth_sqe *tx_sqes;
 		struct libeth_sqe *xdp_sqes;
 	};
 	struct libeth_xdpsq_lock xdpq_lock;
@@ -245,6 +233,14 @@ static inline u16 ixgbevf_desc_unused(struct ixgbevf_ring *ring)
 	return ((ntc > ntu) ? 0 : ring->count) + ntc - ntu - 1;
 }
 
+static inline u16 ixgbevf_desc_used(struct ixgbevf_ring *ring)
+{
+	u16 ntc = ring->next_to_clean;
+	u16 ntu = ring->next_to_use;
+
+	return ((ntu >= ntc) ? 0 : ring->count) + ntu - ntc;
+}
+
 static inline void ixgbevf_write_tail(struct ixgbevf_ring *ring, u32 value)
 {
 	writel(value, ring->tail);
@@ -269,6 +265,15 @@ static inline void ixgbevf_write_tail(struct ixgbevf_ring *ring, u32 value)
 
 #define IXGBEVF_RX_DMA_ATTR \
 	(DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_WEAK_ORDERING)
+
+struct ixgbevf_q_caps {
+	u32 min_rxqs;
+	u32 max_rxqs;
+	u32 min_txqs;
+	u32 max_txqs;
+	u32 num_tcs;
+	u32 def_tc;
+};
 
 /* board specific private data structure */
 struct ixgbevf_adapter {
@@ -346,6 +351,8 @@ struct ixgbevf_adapter {
 	u8 rss_indir_tbl[IXGBEVF_X550_VFRETA_SIZE];
 	u32 flags;
 	bool link_state;
+	struct ixgbevf_q_caps q_caps;
+	u32 num_req_qpairs;
 
 #ifdef CONFIG_XFRM
 	struct ixgbevf_ipsec *ipsec;
@@ -432,6 +439,8 @@ void ixgbevf_free_tx_resources(struct ixgbevf_ring *);
 void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring);
 void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring);
 void ixgbevf_update_stats(struct ixgbevf_adapter *adapter);
+int ixgbevf_init_interrupt_scheme(struct ixgbevf_adapter *adapter);
+void ixgbevf_clear_interrupt_scheme(struct ixgbevf_adapter *adapter);
 int ethtool_ioctl(struct ifreq *ifr);
 
 extern void ixgbevf_write_eitr(struct ixgbevf_q_vector *q_vector);
@@ -443,8 +452,7 @@ void ixgbevf_ipsec_restore(struct ixgbevf_adapter *adapter);
 void ixgbevf_ipsec_rx(struct ixgbevf_ring *rx_ring,
 		      union ixgbe_adv_rx_desc *rx_desc,
 		      struct sk_buff *skb);
-int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring,
-		     struct ixgbevf_tx_buffer *first,
+int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring, struct libeth_sqe *first,
 		     struct ixgbevf_ipsec_tx_data *itd);
 #else
 static inline void ixgbevf_init_ipsec_offload(struct ixgbevf_adapter *adapter)

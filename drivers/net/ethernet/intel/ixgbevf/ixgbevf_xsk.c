@@ -37,6 +37,8 @@ static void ixgbevf_qp_dis(struct ixgbevf_adapter *adapter, u16 qid)
 	ixgbevf_single_irq_disable(adapter, q_vector->v_idx);
 	napi_disable(&q_vector->napi);
 
+	synchronize_net();
+
 	ixgbevf_disable_rx_queue(adapter, adapter->rx_ring[qid]);
 	ixgbevf_clean_rx_ring(rx_ring);
 	ixgbevf_rx_destroy_pp(rx_ring);
@@ -206,15 +208,33 @@ static void ixgbevf_xsk_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 LIBETH_XDP_DEFINE_START();
 LIBETH_XSK_DEFINE_FLUSH_TX(static ixgbevf_xsk_flush_tx, ixgbevf_prep_xdp_sq,
 			   ixgbevf_xsk_xmit_desc);
-LIBETH_XSK_DEFINE_RUN_PROG(static ixgbevf_xsk_run_prog, ixgbevf_xsk_flush_tx);
+__LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbevf_xsk_flush_tx_shared,
+			     ixgbevf_prep_tx_sq, ixgbevf_xsk_xmit_desc,
+			     libeth_xdp_tx_unprep, xsk);
+LIBETH_XDP_DEFINE_END();
+
+static bool ixgbevf_xsk_flush_common(struct libeth_xdp_tx_bulk *bq, u32 flags)
+{
+	const struct ixgbevf_ring *ring = bq->xdpsq;
+
+	if (test_bit(__IXGBEVF_TX_XDP_RING, &ring->state))
+		return ixgbevf_xsk_flush_tx(bq, flags);
+	else
+		return ixgbevf_xsk_flush_tx_shared(bq, flags);
+}
+
+LIBETH_XDP_DEFINE_START();
+LIBETH_XSK_DEFINE_RUN_PROG(static ixgbevf_xsk_run_prog,
+			   ixgbevf_xsk_flush_common);
 LIBETH_XSK_DEFINE_FINALIZE(static ixgbevf_xsk_finalize_xdp_napi,
-			   ixgbevf_xsk_flush_tx, ixgbevf_xdp_rs_and_bump);
+			   ixgbevf_xsk_flush_common, ixgbevf_xdp_rs_and_bump);
 LIBETH_XDP_DEFINE_END();
 
 u32 ixgbevf_clean_xsk_rx_irq(struct ixgbevf_q_vector *q_vector,
 			     struct ixgbevf_ring *rx_ring, int budget)
 {
 	struct ixgbevf_adapter *adapter = q_vector->adapter;
+	int num_xdp_queues = adapter->num_xdp_queues;
 	u32 total_rx_bytes = 0, total_rx_packets = 0;
 	LIBETH_XDP_ONSTACK_BULK(xdp_tx_bulk);
 	struct libeth_xdp_buff *head_xdp;
@@ -225,10 +245,15 @@ u32 ixgbevf_clean_xsk_rx_irq(struct ixgbevf_q_vector *q_vector,
 	if (wake)
 		xsk_clear_rx_need_wakeup(rx_ring->xsk_pool);
 
-	head_xdp = rx_ring->xsk_xdp_head;
-	libeth_xsk_tx_init_bulk(&xdp_tx_bulk, rx_ring->xdp_prog,
-				adapter->netdev, adapter->xdp_ring,
-				adapter->num_xdp_queues);
+	if (num_xdp_queues)
+		libeth_xsk_tx_init_bulk(&xdp_tx_bulk, rx_ring->xdp_prog,
+					adapter->netdev, adapter->xdp_ring,
+					num_xdp_queues);
+	else
+		libeth_xsk_tx_init_bulk_shared(&xdp_tx_bulk, rx_ring->xdp_prog,
+					       adapter->netdev,
+					       adapter->tx_ring,
+					       adapter->num_tx_queues);
 
 	while (likely(total_rx_packets < budget)) {
 		union ixgbe_adv_rx_desc *rx_desc;
@@ -321,10 +346,19 @@ bool ixgbevf_clean_xsk_tx_irq(struct ixgbevf_q_vector *q_vector,
 {
 	u32 budget = min_t(u32, napi_budget, tx_ring->thresh);
 
-	return libeth_xsk_xmit_do_bulk(tx_ring->xsk_pool, tx_ring, budget,
-				       NULL, ixgbevf_prep_xdp_sq,
-				       ixgbevf_xsk_xmit_desc,
-				       ixgbevf_xdp_rs_and_bump);
+	if (ring_is_xdp(tx_ring))
+		return libeth_xsk_xmit_do_bulk(tx_ring->xsk_pool, tx_ring,
+					       budget, NULL,
+					       ixgbevf_prep_xdp_sq,
+					       ixgbevf_xsk_xmit_desc,
+					       ixgbevf_xdp_rs_and_bump);
+	else
+		return __libeth_xsk_xmit_do_bulk(tx_ring->xsk_pool, tx_ring,
+						 budget, NULL,
+						 ixgbevf_prep_tx_sq,
+						 ixgbevf_xsk_xmit_desc,
+						 ixgbevf_xdp_rs_and_bump,
+						 ixgbevf_xdp_tx_unprep);
 }
 
 int ixgbevf_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags)
@@ -335,9 +369,6 @@ int ixgbevf_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags)
 
 	if (unlikely(test_bit(__IXGBEVF_DOWN, &adapter->state)))
 		return -ENETDOWN;
-
-	if (unlikely(queue_id >= adapter->num_xdp_queues))
-		return -EINVAL;
 
 	rx_ring = adapter->rx_ring[queue_id];
 	if (unlikely(!ring_is_xsk(rx_ring)))
