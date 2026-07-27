@@ -11,6 +11,7 @@
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/u64_stats_sync.h>
+#include <net/libeth/types.h>
 #include <net/xdp.h>
 
 #include "vf.h"
@@ -42,17 +43,6 @@ struct ixgbevf_tx_buffer {
 	u32 tx_flags;
 };
 
-struct ixgbevf_rx_buffer {
-	dma_addr_t dma;
-	struct page *page;
-#if (BITS_PER_LONG > 32) || (PAGE_SIZE >= 65536)
-	__u32 page_offset;
-#else
-	__u16 page_offset;
-#endif
-	__u16 pagecnt_bias;
-};
-
 struct ixgbevf_stats {
 	u64 packets;
 	u64 bytes;
@@ -72,12 +62,11 @@ struct ixgbevf_rx_queue_stats {
 };
 
 enum ixgbevf_ring_state_t {
-	__IXGBEVF_RX_3K_BUFFER,
-	__IXGBEVF_RX_BUILD_SKB_ENABLED,
 	__IXGBEVF_TX_DETECT_HANG,
 	__IXGBEVF_HANG_CHECK_ARMED,
 	__IXGBEVF_TX_XDP_RING,
 	__IXGBEVF_TX_XDP_RING_PRIMED,
+	__IXGBEVF_RXTX_XSK_RING,
 };
 
 #define ring_is_xdp(ring) \
@@ -87,24 +76,39 @@ enum ixgbevf_ring_state_t {
 #define clear_ring_xdp(ring) \
 		clear_bit(__IXGBEVF_TX_XDP_RING, &(ring)->state)
 
+#define ring_is_xsk(ring) \
+		test_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+#define set_ring_xsk(ring) \
+		set_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+#define clear_ring_xsk(ring) \
+		clear_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+
 struct ixgbevf_ring {
 	struct ixgbevf_ring *next;
 	struct ixgbevf_q_vector *q_vector;	/* backpointer to q_vector */
 	struct net_device *netdev;
-	struct bpf_prog *xdp_prog;
-	struct device *dev;
+	struct bpf_prog __rcu *xdp_prog;
+	union {
+		struct page_pool *pp;	/* Rx and XDP rings */
+		struct device *dev;	/* Tx ring */
+	};
 	void *desc;			/* descriptor ring memory */
-	dma_addr_t dma;			/* phys. address of descriptor ring */
-	unsigned int size;		/* length in bytes */
+	u32 truesize;			/* Rx buffer full size */
+	u32 hdr_truesize;		/* Rx header buffer full size */
 	u16 count;			/* amount of descriptors */
-	u16 next_to_use;
 	u16 next_to_clean;
-	u16 next_to_alloc;
+	u32 next_to_use;
+	u32 pending;			/* Sent-not-completed descriptors */
 
 	union {
+		struct libeth_fqe *rx_fqes;
+		struct libeth_xdp_buff	**xsk_fqes;
 		struct ixgbevf_tx_buffer *tx_buffer_info;
-		struct ixgbevf_rx_buffer *rx_buffer_info;
+		struct libeth_sqe *xdp_sqes;
 	};
+	struct libeth_xdpsq_lock xdpq_lock;
+	u32 cached_ntu;
+	u32 thresh;
 	unsigned long state;
 	struct ixgbevf_stats stats;
 	struct u64_stats_sync syncp;
@@ -112,16 +116,23 @@ struct ixgbevf_ring {
 		struct ixgbevf_tx_queue_stats tx_stats;
 		struct ixgbevf_rx_queue_stats rx_stats;
 	};
+	struct libeth_fqe *hdr_fqes;
+	struct page_pool *hdr_pp;
 	struct xdp_rxq_info xdp_rxq;
 	u64 hw_csum_rx_error;
 	u8 __iomem *tail;
-	struct sk_buff *skb;
 
 	/* holds the special value that gets the hardware register offset
 	 * associated with this ring, which is different for DCB and RSS modes
 	 */
 	u16 reg_idx;
 	int queue_index; /* needed for multiqueue queue management */
+	u32 rx_buf_len;
+	struct libeth_xdp_buff_stash xdp_stash;
+	struct libeth_xdp_buff *xsk_xdp_head;
+	unsigned int dma_size;		/* length in bytes */
+	dma_addr_t dma;			/* phys. address of descriptor ring */
+	struct xsk_buff_pool *xsk_pool; /* AF_XDP ZC rings */
 } ____cacheline_internodealigned_in_smp;
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
@@ -144,21 +155,17 @@ struct ixgbevf_ring {
 #define IXGBEVF_MIN_RXD		64
 
 /* Supported Rx Buffer Sizes */
-#define IXGBEVF_RXBUFFER_256	256    /* Used for packet split */
-#define IXGBEVF_RXBUFFER_2048	2048
+#define IXGBEVF_RXBUFFER_256	256
 #define IXGBEVF_RXBUFFER_3072	3072
 
 #define IXGBEVF_RX_HDR_SIZE	IXGBEVF_RXBUFFER_256
 
 #define MAXIMUM_ETHERNET_VLAN_SIZE (VLAN_ETH_FRAME_LEN + ETH_FCS_LEN)
 
-#define IXGBEVF_SKB_PAD		(NET_SKB_PAD + NET_IP_ALIGN)
-#if (PAGE_SIZE < 8192)
-#define IXGBEVF_MAX_FRAME_BUILD_SKB \
-	(SKB_WITH_OVERHEAD(IXGBEVF_RXBUFFER_2048) - IXGBEVF_SKB_PAD)
-#else
-#define IXGBEVF_MAX_FRAME_BUILD_SKB	IXGBEVF_RXBUFFER_2048
-#endif
+#define IXGBEVF_RX_PAGE_LEN(hr)		(ALIGN_DOWN(LIBETH_RX_PAGE_LEN(hr), \
+					 IXGBE_SRRCTL_BSIZEPKT_STEP))
+#define IXGBEVF_RX_SRRCTL_BUF_SIZE(mtu)	(ALIGN((mtu) + LIBETH_RX_LL_LEN, \
+					       IXGBE_SRRCTL_BSIZEPKT_STEP))
 
 #define IXGBE_TX_FLAGS_CSUM		BIT(0)
 #define IXGBE_TX_FLAGS_VLAN		BIT(1)
@@ -168,43 +175,6 @@ struct ixgbevf_ring {
 #define IXGBE_TX_FLAGS_VLAN_MASK	0xffff0000
 #define IXGBE_TX_FLAGS_VLAN_PRIO_MASK	0x0000e000
 #define IXGBE_TX_FLAGS_VLAN_SHIFT	16
-
-#define ring_uses_large_buffer(ring) \
-	test_bit(__IXGBEVF_RX_3K_BUFFER, &(ring)->state)
-#define set_ring_uses_large_buffer(ring) \
-	set_bit(__IXGBEVF_RX_3K_BUFFER, &(ring)->state)
-#define clear_ring_uses_large_buffer(ring) \
-	clear_bit(__IXGBEVF_RX_3K_BUFFER, &(ring)->state)
-
-#define ring_uses_build_skb(ring) \
-	test_bit(__IXGBEVF_RX_BUILD_SKB_ENABLED, &(ring)->state)
-#define set_ring_build_skb_enabled(ring) \
-	set_bit(__IXGBEVF_RX_BUILD_SKB_ENABLED, &(ring)->state)
-#define clear_ring_build_skb_enabled(ring) \
-	clear_bit(__IXGBEVF_RX_BUILD_SKB_ENABLED, &(ring)->state)
-
-static inline unsigned int ixgbevf_rx_bufsz(struct ixgbevf_ring *ring)
-{
-#if (PAGE_SIZE < 8192)
-	if (ring_uses_large_buffer(ring))
-		return IXGBEVF_RXBUFFER_3072;
-
-	if (ring_uses_build_skb(ring))
-		return IXGBEVF_MAX_FRAME_BUILD_SKB;
-#endif
-	return IXGBEVF_RXBUFFER_2048;
-}
-
-static inline unsigned int ixgbevf_rx_pg_order(struct ixgbevf_ring *ring)
-{
-#if (PAGE_SIZE < 8192)
-	if (ring_uses_large_buffer(ring))
-		return 1;
-#endif
-	return 0;
-}
-
-#define ixgbevf_rx_pg_size(_ring) (PAGE_SIZE << ixgbevf_rx_pg_order(_ring))
 
 #define check_for_tx_hang(ring) \
 	test_bit(__IXGBEVF_TX_DETECT_HANG, &(ring)->state)
@@ -377,8 +347,6 @@ struct ixgbevf_adapter {
 	u32 flags;
 	bool link_state;
 
-#define IXGBEVF_FLAGS_LEGACY_RX		BIT(1)
-
 #ifdef CONFIG_XFRM
 	struct ixgbevf_ipsec *ipsec;
 #endif /* CONFIG_XFRM */
@@ -395,6 +363,8 @@ enum ixbgevf_state_t {
 	__IXGBEVF_RESET_REQUESTED,
 	__IXGBEVF_QUEUE_RESET_REQUESTED,
 };
+
+#define IXGBEVF_FLAG_HSPLIT	BIT(0)
 
 enum ixgbevf_boards {
 	board_82599_vf,
@@ -439,14 +409,28 @@ int ixgbevf_open(struct net_device *netdev);
 int ixgbevf_close(struct net_device *netdev);
 void ixgbevf_up(struct ixgbevf_adapter *adapter);
 void ixgbevf_down(struct ixgbevf_adapter *adapter);
+void ixgbevf_flush_tx_queue(struct ixgbevf_ring *ring);
+void ixgbevf_disable_rx_queue(struct ixgbevf_adapter *adapter,
+			      struct ixgbevf_ring *ring);
+void ixgbevf_rx_desc_queue_enable(struct ixgbevf_adapter *adapter,
+				  struct ixgbevf_ring *ring);
 void ixgbevf_reinit_locked(struct ixgbevf_adapter *adapter);
 void ixgbevf_reset(struct ixgbevf_adapter *adapter);
 void ixgbevf_set_ethtool_ops(struct net_device *netdev);
 int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 			       struct ixgbevf_ring *rx_ring);
+void ixgbevf_irq_enable(struct ixgbevf_adapter *adapter);
+void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
+			       struct ixgbevf_ring *ring);
 int ixgbevf_setup_tx_resources(struct ixgbevf_ring *);
+void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
+			       struct ixgbevf_ring *ring);
 void ixgbevf_free_rx_resources(struct ixgbevf_ring *);
+void ixgbevf_clean_rx_ring(struct ixgbevf_ring *rx_ring);
+void ixgbevf_rx_destroy_pp(struct ixgbevf_ring *rx_ring);
 void ixgbevf_free_tx_resources(struct ixgbevf_ring *);
+void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring);
+void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring);
 void ixgbevf_update_stats(struct ixgbevf_adapter *adapter);
 int ethtool_ioctl(struct ifreq *ifr);
 

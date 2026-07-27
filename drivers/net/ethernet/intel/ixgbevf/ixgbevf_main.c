@@ -30,9 +30,12 @@
 #include <linux/bpf.h>
 #include <linux/bpf_trace.h>
 #include <linux/atomic.h>
+#include <net/libeth/xsk.h>
 #include <net/xfrm.h>
 
-#include "ixgbevf.h"
+#include "ixgbevf_txrx_lib.h"
+#include "ixgbevf_xdp_lib.h"
+#include "ixgbevf_xsk.h"
 
 const char ixgbevf_driver_name[] = "ixgbevf";
 static const char ixgbevf_driver_string[] =
@@ -82,6 +85,8 @@ static const struct pci_device_id ixgbevf_pci_tbl[] = {
 MODULE_DEVICE_TABLE(pci, ixgbevf_pci_tbl);
 
 MODULE_DESCRIPTION("Intel(R) 10 Gigabit Virtual Function Network Driver");
+MODULE_IMPORT_NS("LIBETH");
+MODULE_IMPORT_NS("LIBETH_XDP");
 MODULE_LICENSE("GPL v2");
 
 #define DEFAULT_MSG_ENABLE (NETIF_MSG_DRV|NETIF_MSG_PROBE|NETIF_MSG_LINK)
@@ -112,9 +117,6 @@ static void ixgbevf_service_event_complete(struct ixgbevf_adapter *adapter)
 static void ixgbevf_queue_reset_subtask(struct ixgbevf_adapter *adapter);
 static void ixgbevf_set_itr(struct ixgbevf_q_vector *q_vector);
 static void ixgbevf_free_all_rx_resources(struct ixgbevf_adapter *adapter);
-static bool ixgbevf_can_reuse_rx_page(struct ixgbevf_rx_buffer *rx_buffer);
-static void ixgbevf_reuse_rx_page(struct ixgbevf_ring *rx_ring,
-				  struct ixgbevf_rx_buffer *old_buff);
 
 static void ixgbevf_remove_adapter(struct ixgbe_hw *hw)
 {
@@ -306,10 +308,7 @@ static bool ixgbevf_clean_tx_irq(struct ixgbevf_q_vector *q_vector,
 			total_ipsec++;
 
 		/* free the skb */
-		if (ring_is_xdp(tx_ring))
-			page_frag_free(tx_buffer->data);
-		else
-			napi_consume_skb(tx_buffer->skb, napi_budget);
+		napi_consume_skb(tx_buffer->skb, napi_budget);
 
 		/* unmap skb header data */
 		dma_unmap_single(tx_ring->dev,
@@ -392,18 +391,14 @@ static bool ixgbevf_clean_tx_irq(struct ixgbevf_q_vector *q_vector,
 		       eop_desc, (eop_desc ? eop_desc->wb.status : 0),
 		       tx_ring->tx_buffer_info[i].time_stamp, jiffies);
 
-		if (!ring_is_xdp(tx_ring))
-			netif_stop_subqueue(tx_ring->netdev,
-					    tx_ring->queue_index);
+		netif_stop_subqueue(tx_ring->netdev,
+				    tx_ring->queue_index);
 
 		/* schedule immediate reset if we believe we hung */
 		ixgbevf_tx_timeout_reset(adapter);
 
 		return true;
 	}
-
-	if (ring_is_xdp(tx_ring))
-		return !!budget;
 
 #define TX_WAKE_THRESHOLD (DESC_NEEDED * 2)
 	if (unlikely(total_packets && netif_carrier_ok(tx_ring->netdev) &&
@@ -426,227 +421,6 @@ static bool ixgbevf_clean_tx_irq(struct ixgbevf_q_vector *q_vector,
 }
 
 /**
- * ixgbevf_rx_skb - Helper function to determine proper Rx method
- * @q_vector: structure containing interrupt and ring information
- * @skb: packet to send up
- **/
-static void ixgbevf_rx_skb(struct ixgbevf_q_vector *q_vector,
-			   struct sk_buff *skb)
-{
-	napi_gro_receive(&q_vector->napi, skb);
-}
-
-#define IXGBE_RSS_L4_TYPES_MASK \
-	((1ul << IXGBE_RXDADV_RSSTYPE_IPV4_TCP) | \
-	 (1ul << IXGBE_RXDADV_RSSTYPE_IPV4_UDP) | \
-	 (1ul << IXGBE_RXDADV_RSSTYPE_IPV6_TCP) | \
-	 (1ul << IXGBE_RXDADV_RSSTYPE_IPV6_UDP))
-
-static inline void ixgbevf_rx_hash(struct ixgbevf_ring *ring,
-				   union ixgbe_adv_rx_desc *rx_desc,
-				   struct sk_buff *skb)
-{
-	u16 rss_type;
-
-	if (!(ring->netdev->features & NETIF_F_RXHASH))
-		return;
-
-	rss_type = le16_to_cpu(rx_desc->wb.lower.lo_dword.hs_rss.pkt_info) &
-		   IXGBE_RXDADV_RSSTYPE_MASK;
-
-	if (!rss_type)
-		return;
-
-	skb_set_hash(skb, le32_to_cpu(rx_desc->wb.lower.hi_dword.rss),
-		     (IXGBE_RSS_L4_TYPES_MASK & (1ul << rss_type)) ?
-		     PKT_HASH_TYPE_L4 : PKT_HASH_TYPE_L3);
-}
-
-/**
- * ixgbevf_rx_checksum - indicate in skb if hw indicated a good cksum
- * @ring: structure containig ring specific data
- * @rx_desc: current Rx descriptor being processed
- * @skb: skb currently being received and modified
- **/
-static inline void ixgbevf_rx_checksum(struct ixgbevf_ring *ring,
-				       union ixgbe_adv_rx_desc *rx_desc,
-				       struct sk_buff *skb)
-{
-	skb_checksum_none_assert(skb);
-
-	/* Rx csum disabled */
-	if (!(ring->netdev->features & NETIF_F_RXCSUM))
-		return;
-
-	/* if IP and error */
-	if (ixgbevf_test_staterr(rx_desc, IXGBE_RXD_STAT_IPCS) &&
-	    ixgbevf_test_staterr(rx_desc, IXGBE_RXDADV_ERR_IPE)) {
-		ring->rx_stats.csum_err++;
-		return;
-	}
-
-	if (!ixgbevf_test_staterr(rx_desc, IXGBE_RXD_STAT_L4CS))
-		return;
-
-	if (ixgbevf_test_staterr(rx_desc, IXGBE_RXDADV_ERR_TCPE)) {
-		ring->rx_stats.csum_err++;
-		return;
-	}
-
-	/* It must be a TCP or UDP packet with a valid checksum */
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-}
-
-/**
- * ixgbevf_process_skb_fields - Populate skb header fields from Rx descriptor
- * @rx_ring: rx descriptor ring packet is being transacted on
- * @rx_desc: pointer to the EOP Rx descriptor
- * @skb: pointer to current skb being populated
- *
- * This function checks the ring, descriptor, and packet information in
- * order to populate the checksum, VLAN, protocol, and other fields within
- * the skb.
- **/
-static void ixgbevf_process_skb_fields(struct ixgbevf_ring *rx_ring,
-				       union ixgbe_adv_rx_desc *rx_desc,
-				       struct sk_buff *skb)
-{
-	ixgbevf_rx_hash(rx_ring, rx_desc, skb);
-	ixgbevf_rx_checksum(rx_ring, rx_desc, skb);
-
-	if (ixgbevf_test_staterr(rx_desc, IXGBE_RXD_STAT_VP)) {
-		u16 vid = le16_to_cpu(rx_desc->wb.upper.vlan);
-		unsigned long *active_vlans = netdev_priv(rx_ring->netdev);
-
-		if (test_bit(vid & VLAN_VID_MASK, active_vlans))
-			__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q), vid);
-	}
-
-	if (ixgbevf_test_staterr(rx_desc, IXGBE_RXDADV_STAT_SECP))
-		ixgbevf_ipsec_rx(rx_ring, rx_desc, skb);
-
-	skb->protocol = eth_type_trans(skb, rx_ring->netdev);
-}
-
-static
-struct ixgbevf_rx_buffer *ixgbevf_get_rx_buffer(struct ixgbevf_ring *rx_ring,
-						const unsigned int size)
-{
-	struct ixgbevf_rx_buffer *rx_buffer;
-
-	rx_buffer = &rx_ring->rx_buffer_info[rx_ring->next_to_clean];
-	prefetchw(rx_buffer->page);
-
-	/* we are reusing so sync this buffer for CPU use */
-	dma_sync_single_range_for_cpu(rx_ring->dev,
-				      rx_buffer->dma,
-				      rx_buffer->page_offset,
-				      size,
-				      DMA_FROM_DEVICE);
-
-	rx_buffer->pagecnt_bias--;
-
-	return rx_buffer;
-}
-
-static void ixgbevf_put_rx_buffer(struct ixgbevf_ring *rx_ring,
-				  struct ixgbevf_rx_buffer *rx_buffer,
-				  struct sk_buff *skb)
-{
-	if (ixgbevf_can_reuse_rx_page(rx_buffer)) {
-		/* hand second half of page back to the ring */
-		ixgbevf_reuse_rx_page(rx_ring, rx_buffer);
-	} else {
-		if (IS_ERR(skb))
-			/* We are not reusing the buffer so unmap it and free
-			 * any references we are holding to it
-			 */
-			dma_unmap_page_attrs(rx_ring->dev, rx_buffer->dma,
-					     ixgbevf_rx_pg_size(rx_ring),
-					     DMA_FROM_DEVICE,
-					     IXGBEVF_RX_DMA_ATTR);
-		__page_frag_cache_drain(rx_buffer->page,
-					rx_buffer->pagecnt_bias);
-	}
-
-	/* clear contents of rx_buffer */
-	rx_buffer->page = NULL;
-}
-
-/**
- * ixgbevf_is_non_eop - process handling of non-EOP buffers
- * @rx_ring: Rx ring being processed
- * @rx_desc: Rx descriptor for current buffer
- *
- * This function updates next to clean.  If the buffer is an EOP buffer
- * this function exits returning false, otherwise it will place the
- * sk_buff in the next buffer to be chained and return true indicating
- * that this is in fact a non-EOP buffer.
- **/
-static bool ixgbevf_is_non_eop(struct ixgbevf_ring *rx_ring,
-			       union ixgbe_adv_rx_desc *rx_desc)
-{
-	u32 ntc = rx_ring->next_to_clean + 1;
-
-	/* fetch, update, and store next to clean */
-	ntc = (ntc < rx_ring->count) ? ntc : 0;
-	rx_ring->next_to_clean = ntc;
-
-	prefetch(IXGBEVF_RX_DESC(rx_ring, ntc));
-
-	if (likely(ixgbevf_test_staterr(rx_desc, IXGBE_RXD_STAT_EOP)))
-		return false;
-
-	return true;
-}
-
-static inline unsigned int ixgbevf_rx_offset(struct ixgbevf_ring *rx_ring)
-{
-	return ring_uses_build_skb(rx_ring) ? IXGBEVF_SKB_PAD : 0;
-}
-
-static bool ixgbevf_alloc_mapped_page(struct ixgbevf_ring *rx_ring,
-				      struct ixgbevf_rx_buffer *bi)
-{
-	struct page *page = bi->page;
-	dma_addr_t dma;
-
-	/* since we are recycling buffers we should seldom need to alloc */
-	if (likely(page))
-		return true;
-
-	/* alloc new page for storage */
-	page = dev_alloc_pages(ixgbevf_rx_pg_order(rx_ring));
-	if (unlikely(!page)) {
-		rx_ring->rx_stats.alloc_rx_page_failed++;
-		return false;
-	}
-
-	/* map page for use */
-	dma = dma_map_page_attrs(rx_ring->dev, page, 0,
-				 ixgbevf_rx_pg_size(rx_ring),
-				 DMA_FROM_DEVICE, IXGBEVF_RX_DMA_ATTR);
-
-	/* if mapping failed free memory back to system since
-	 * there isn't much point in holding memory we can't use
-	 */
-	if (dma_mapping_error(rx_ring->dev, dma)) {
-		__free_pages(page, ixgbevf_rx_pg_order(rx_ring));
-
-		rx_ring->rx_stats.alloc_rx_page_failed++;
-		return false;
-	}
-
-	bi->dma = dma;
-	bi->page = page;
-	bi->page_offset = ixgbevf_rx_offset(rx_ring);
-	bi->pagecnt_bias = 1;
-	rx_ring->rx_stats.alloc_rx_page++;
-
-	return true;
-}
-
-/**
  * ixgbevf_alloc_rx_buffers - Replace used receive buffers; packet split
  * @rx_ring: rx descriptor ring (for a specific queue) to setup buffers on
  * @cleaned_count: number of buffers to replace
@@ -655,39 +429,48 @@ static void ixgbevf_alloc_rx_buffers(struct ixgbevf_ring *rx_ring,
 				     u16 cleaned_count)
 {
 	union ixgbe_adv_rx_desc *rx_desc;
-	struct ixgbevf_rx_buffer *bi;
-	unsigned int i = rx_ring->next_to_use;
+	const struct libeth_fq_fp fq = {
+		.pp		= rx_ring->pp,
+		.fqes		= rx_ring->rx_fqes,
+		.truesize	= rx_ring->truesize,
+		.count		= rx_ring->count,
+	};
+	const struct libeth_fq_fp hdr_fq = {
+		.pp		= rx_ring->hdr_pp,
+		.fqes		= rx_ring->hdr_fqes,
+		.truesize	= rx_ring->hdr_truesize,
+		.count		= rx_ring->count,
+	};
+	u16 ntu = rx_ring->next_to_use;
 
-	/* nothing to do or no valid netdev defined */
-	if (!cleaned_count || !rx_ring->netdev)
+	/* nothing to do or page pool is not present */
+	if (unlikely(!cleaned_count || !fq.pp))
 		return;
 
-	rx_desc = IXGBEVF_RX_DESC(rx_ring, i);
-	bi = &rx_ring->rx_buffer_info[i];
-	i -= rx_ring->count;
+	rx_desc = IXGBEVF_RX_DESC(rx_ring, ntu);
 
 	do {
-		if (!ixgbevf_alloc_mapped_page(rx_ring, bi))
+		dma_addr_t addr;
+
+		addr = libeth_rx_alloc(&fq, ntu);
+		if (addr == DMA_MAPPING_ERROR)
 			break;
 
-		/* sync the buffer for use by the device */
-		dma_sync_single_range_for_device(rx_ring->dev, bi->dma,
-						 bi->page_offset,
-						 ixgbevf_rx_bufsz(rx_ring),
-						 DMA_FROM_DEVICE);
+		rx_desc->read.pkt_addr = cpu_to_le64(addr);
 
-		/* Refresh the desc even if pkt_addr didn't change
-		 * because each write-back erases this info.
-		 */
-		rx_desc->read.pkt_addr = cpu_to_le64(bi->dma + bi->page_offset);
+		if (hdr_fq.pp) {
+			addr = libeth_rx_alloc(&hdr_fq, ntu);
+			if (addr == DMA_MAPPING_ERROR) {
+				libeth_rx_recycle_slow(fq.fqes[ntu].netmem);
+				break;
+			}
+		}
 
 		rx_desc++;
-		bi++;
-		i++;
-		if (unlikely(!i)) {
+		ntu++;
+		if (unlikely(ntu == fq.count)) {
 			rx_desc = IXGBEVF_RX_DESC(rx_ring, 0);
-			bi = rx_ring->rx_buffer_info;
-			i -= rx_ring->count;
+			ntu = 0;
 		}
 
 		/* clear the length for the next_to_use descriptor */
@@ -696,14 +479,9 @@ static void ixgbevf_alloc_rx_buffers(struct ixgbevf_ring *rx_ring,
 		cleaned_count--;
 	} while (cleaned_count);
 
-	i += rx_ring->count;
-
-	if (rx_ring->next_to_use != i) {
+	if (likely(rx_ring->next_to_use != ntu)) {
 		/* record the next descriptor to use */
-		rx_ring->next_to_use = i;
-
-		/* update next to alloc since we have filled the ring */
-		rx_ring->next_to_alloc = i;
+		rx_ring->next_to_use = ntu;
 
 		/* Force memory writes to complete before letting h/w
 		 * know there are new descriptors to fetch.  (Only
@@ -711,206 +489,8 @@ static void ixgbevf_alloc_rx_buffers(struct ixgbevf_ring *rx_ring,
 		 * such as IA-64).
 		 */
 		wmb();
-		ixgbevf_write_tail(rx_ring, i);
+		ixgbevf_write_tail(rx_ring, ntu);
 	}
-}
-
-/**
- * ixgbevf_cleanup_headers - Correct corrupted or empty headers
- * @rx_ring: rx descriptor ring packet is being transacted on
- * @rx_desc: pointer to the EOP Rx descriptor
- * @skb: pointer to current skb being fixed
- *
- * Check for corrupted packet headers caused by senders on the local L2
- * embedded NIC switch not setting up their Tx Descriptors right.  These
- * should be very rare.
- *
- * Also address the case where we are pulling data in on pages only
- * and as such no data is present in the skb header.
- *
- * In addition if skb is not at least 60 bytes we need to pad it so that
- * it is large enough to qualify as a valid Ethernet frame.
- *
- * Returns true if an error was encountered and skb was freed.
- **/
-static bool ixgbevf_cleanup_headers(struct ixgbevf_ring *rx_ring,
-				    union ixgbe_adv_rx_desc *rx_desc,
-				    struct sk_buff *skb)
-{
-	/* verify that the packet does not have any known errors */
-	if (unlikely(ixgbevf_test_staterr(rx_desc,
-					  IXGBE_RXDADV_ERR_FRAME_ERR_MASK))) {
-		struct net_device *netdev = rx_ring->netdev;
-
-		if (!(netdev->features & NETIF_F_RXALL)) {
-			dev_kfree_skb_any(skb);
-			return true;
-		}
-	}
-
-	/* if eth_skb_pad returns an error the skb was freed */
-	if (eth_skb_pad(skb))
-		return true;
-
-	return false;
-}
-
-/**
- * ixgbevf_reuse_rx_page - page flip buffer and store it back on the ring
- * @rx_ring: rx descriptor ring to store buffers on
- * @old_buff: donor buffer to have page reused
- *
- * Synchronizes page for reuse by the adapter
- **/
-static void ixgbevf_reuse_rx_page(struct ixgbevf_ring *rx_ring,
-				  struct ixgbevf_rx_buffer *old_buff)
-{
-	struct ixgbevf_rx_buffer *new_buff;
-	u16 nta = rx_ring->next_to_alloc;
-
-	new_buff = &rx_ring->rx_buffer_info[nta];
-
-	/* update, and store next to alloc */
-	nta++;
-	rx_ring->next_to_alloc = (nta < rx_ring->count) ? nta : 0;
-
-	/* transfer page from old buffer to new buffer */
-	new_buff->page = old_buff->page;
-	new_buff->dma = old_buff->dma;
-	new_buff->page_offset = old_buff->page_offset;
-	new_buff->pagecnt_bias = old_buff->pagecnt_bias;
-}
-
-static bool ixgbevf_can_reuse_rx_page(struct ixgbevf_rx_buffer *rx_buffer)
-{
-	unsigned int pagecnt_bias = rx_buffer->pagecnt_bias;
-	struct page *page = rx_buffer->page;
-
-	/* avoid re-using remote and pfmemalloc pages */
-	if (!dev_page_is_reusable(page))
-		return false;
-
-#if (PAGE_SIZE < 8192)
-	/* if we are only owner of page we can reuse it */
-	if (unlikely((page_ref_count(page) - pagecnt_bias) > 1))
-		return false;
-#else
-#define IXGBEVF_LAST_OFFSET \
-	(SKB_WITH_OVERHEAD(PAGE_SIZE) - IXGBEVF_RXBUFFER_2048)
-
-	if (rx_buffer->page_offset > IXGBEVF_LAST_OFFSET)
-		return false;
-
-#endif
-
-	/* If we have drained the page fragment pool we need to update
-	 * the pagecnt_bias and page count so that we fully restock the
-	 * number of references the driver holds.
-	 */
-	if (unlikely(!pagecnt_bias)) {
-		page_ref_add(page, USHRT_MAX);
-		rx_buffer->pagecnt_bias = USHRT_MAX;
-	}
-
-	return true;
-}
-
-/**
- * ixgbevf_add_rx_frag - Add contents of Rx buffer to sk_buff
- * @rx_ring: rx descriptor ring to transact packets on
- * @rx_buffer: buffer containing page to add
- * @skb: sk_buff to place the data into
- * @size: size of buffer to be added
- *
- * This function will add the data contained in rx_buffer->page to the skb.
- **/
-static void ixgbevf_add_rx_frag(struct ixgbevf_ring *rx_ring,
-				struct ixgbevf_rx_buffer *rx_buffer,
-				struct sk_buff *skb,
-				unsigned int size)
-{
-#if (PAGE_SIZE < 8192)
-	unsigned int truesize = ixgbevf_rx_pg_size(rx_ring) / 2;
-#else
-	unsigned int truesize = ring_uses_build_skb(rx_ring) ?
-				SKB_DATA_ALIGN(IXGBEVF_SKB_PAD + size) :
-				SKB_DATA_ALIGN(size);
-#endif
-	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, rx_buffer->page,
-			rx_buffer->page_offset, size, truesize);
-#if (PAGE_SIZE < 8192)
-	rx_buffer->page_offset ^= truesize;
-#else
-	rx_buffer->page_offset += truesize;
-#endif
-}
-
-static
-struct sk_buff *ixgbevf_construct_skb(struct ixgbevf_ring *rx_ring,
-				      struct ixgbevf_rx_buffer *rx_buffer,
-				      struct xdp_buff *xdp,
-				      union ixgbe_adv_rx_desc *rx_desc)
-{
-	unsigned int size = xdp->data_end - xdp->data;
-#if (PAGE_SIZE < 8192)
-	unsigned int truesize = ixgbevf_rx_pg_size(rx_ring) / 2;
-#else
-	unsigned int truesize = SKB_DATA_ALIGN(xdp->data_end -
-					       xdp->data_hard_start);
-#endif
-	unsigned int headlen;
-	struct sk_buff *skb;
-
-	/* prefetch first cache line of first page */
-	net_prefetch(xdp->data);
-
-	/* Note, we get here by enabling legacy-rx via:
-	 *
-	 *    ethtool --set-priv-flags <dev> legacy-rx on
-	 *
-	 * In this mode, we currently get 0 extra XDP headroom as
-	 * opposed to having legacy-rx off, where we process XDP
-	 * packets going to stack via ixgbevf_build_skb().
-	 *
-	 * For ixgbevf_construct_skb() mode it means that the
-	 * xdp->data_meta will always point to xdp->data, since
-	 * the helper cannot expand the head. Should this ever
-	 * changed in future for legacy-rx mode on, then lets also
-	 * add xdp->data_meta handling here.
-	 */
-
-	/* allocate a skb to store the frags */
-	skb = napi_alloc_skb(&rx_ring->q_vector->napi, IXGBEVF_RX_HDR_SIZE);
-	if (unlikely(!skb))
-		return NULL;
-
-	/* Determine available headroom for copy */
-	headlen = size;
-	if (headlen > IXGBEVF_RX_HDR_SIZE)
-		headlen = eth_get_headlen(skb->dev, xdp->data,
-					  IXGBEVF_RX_HDR_SIZE);
-
-	/* align pull length to size of long to optimize memcpy performance */
-	memcpy(__skb_put(skb, headlen), xdp->data,
-	       ALIGN(headlen, sizeof(long)));
-
-	/* update all of the pointers */
-	size -= headlen;
-	if (size) {
-		skb_add_rx_frag(skb, 0, rx_buffer->page,
-				(xdp->data + headlen) -
-					page_address(rx_buffer->page),
-				size, truesize);
-#if (PAGE_SIZE < 8192)
-		rx_buffer->page_offset ^= truesize;
-#else
-		rx_buffer->page_offset += truesize;
-#endif
-	} else {
-		rx_buffer->pagecnt_bias++;
-	}
-
-	return skb;
 }
 
 static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
@@ -921,219 +501,103 @@ static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
 	IXGBE_WRITE_REG(hw, IXGBE_VTEIMS, qmask);
 }
 
-static struct sk_buff *ixgbevf_build_skb(struct ixgbevf_ring *rx_ring,
-					 struct ixgbevf_rx_buffer *rx_buffer,
-					 struct xdp_buff *xdp,
-					 union ixgbe_adv_rx_desc *rx_desc)
+void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring)
 {
-	unsigned int metasize = xdp->data - xdp->data_meta;
-#if (PAGE_SIZE < 8192)
-	unsigned int truesize = ixgbevf_rx_pg_size(rx_ring) / 2;
-#else
-	unsigned int truesize = SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) +
-				SKB_DATA_ALIGN(xdp->data_end -
-					       xdp->data_hard_start);
-#endif
-	struct sk_buff *skb;
-
-	/* Prefetch first cache line of first page. If xdp->data_meta
-	 * is unused, this points to xdp->data, otherwise, we likely
-	 * have a consumer accessing first few bytes of meta data,
-	 * and then actual data.
-	 */
-	net_prefetch(xdp->data_meta);
-
-	/* build an skb around the page buffer */
-	skb = napi_build_skb(xdp->data_hard_start, truesize);
-	if (unlikely(!skb))
-		return NULL;
-
-	/* update pointers within the skb to store the data */
-	skb_reserve(skb, xdp->data - xdp->data_hard_start);
-	__skb_put(skb, xdp->data_end - xdp->data);
-	if (metasize)
-		skb_metadata_set(skb, metasize);
-
-	/* update buffer offset */
-#if (PAGE_SIZE < 8192)
-	rx_buffer->page_offset ^= truesize;
-#else
-	rx_buffer->page_offset += truesize;
-#endif
-
-	return skb;
+	ixgbevf_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
+	libeth_xdpsq_put(&xdp_ring->xdpq_lock, xdp_ring->netdev);
 }
 
-#define IXGBEVF_XDP_PASS 0
-#define IXGBEVF_XDP_CONSUMED 1
-#define IXGBEVF_XDP_TX 2
-
-static int ixgbevf_xmit_xdp_ring(struct ixgbevf_ring *ring,
-				 struct xdp_buff *xdp)
+static void ixgbevf_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
+				  const struct libeth_xdpsq *sq,
+				  u64 priv)
 {
-	struct ixgbevf_tx_buffer *tx_buffer;
-	union ixgbe_adv_tx_desc *tx_desc;
-	u32 len, cmd_type;
-	dma_addr_t dma;
-	u16 i;
+	union ixgbe_adv_tx_desc *tx_desc =
+		&((union ixgbe_adv_tx_desc *)sq->descs)[i];
 
-	len = xdp->data_end - xdp->data;
+	u32 cmd_type = IXGBE_ADVTXD_DTYP_DATA |
+		       IXGBE_ADVTXD_DCMD_DEXT |
+		       IXGBE_ADVTXD_DCMD_IFCS |
+		       desc.len;
 
-	if (unlikely(!ixgbevf_desc_unused(ring)))
-		return IXGBEVF_XDP_CONSUMED;
+	if (desc.flags & LIBETH_XDP_TX_LAST)
+		cmd_type |= IXGBE_TXD_CMD_EOP;
 
-	dma = dma_map_single(ring->dev, xdp->data, len, DMA_TO_DEVICE);
-	if (dma_mapping_error(ring->dev, dma))
-		return IXGBEVF_XDP_CONSUMED;
+	if (desc.flags & LIBETH_XDP_TX_FIRST) {
+		struct libeth_sqe *sqe = &sq->sqes[i];
+		struct skb_shared_info *sinfo;
+		u16 full_len = desc.len;
 
-	/* record the location of the first descriptor for this packet */
-	i = ring->next_to_use;
-	tx_buffer = &ring->tx_buffer_info[i];
+		if (desc.flags & LIBETH_XDP_TX_MULTI) {
+			sinfo = sqe->type == LIBETH_SQE_XDP_TX ?
+				sqe->sinfo :
+				xdp_get_shared_info_from_frame(sqe->xdpf);
+			full_len += sinfo->xdp_frags_size;
+		}
 
-	dma_unmap_len_set(tx_buffer, len, len);
-	dma_unmap_addr_set(tx_buffer, dma, dma);
-	tx_buffer->data = xdp->data;
-	tx_buffer->bytecount = len;
-	tx_buffer->gso_segs = 1;
-	tx_buffer->protocol = 0;
-
-	/* Populate minimal context descriptor that will provide for the
-	 * fact that we are expected to process Ethernet frames.
-	 */
-	if (!test_bit(__IXGBEVF_TX_XDP_RING_PRIMED, &ring->state)) {
-		struct ixgbe_adv_tx_context_desc *context_desc;
-
-		set_bit(__IXGBEVF_TX_XDP_RING_PRIMED, &ring->state);
-
-		context_desc = IXGBEVF_TX_CTXTDESC(ring, 0);
-		context_desc->vlan_macip_lens	=
-			cpu_to_le32(ETH_HLEN << IXGBE_ADVTXD_MACLEN_SHIFT);
-		context_desc->fceof_saidx	= 0;
-		context_desc->type_tucmd_mlhl	=
-			cpu_to_le32(IXGBE_TXD_CMD_DEXT |
-				    IXGBE_ADVTXD_DTYP_CTXT);
-		context_desc->mss_l4len_idx	= 0;
-
-		i = 1;
-	}
-
-	/* put descriptor type bits */
-	cmd_type = IXGBE_ADVTXD_DTYP_DATA |
-		   IXGBE_ADVTXD_DCMD_DEXT |
-		   IXGBE_ADVTXD_DCMD_IFCS;
-	cmd_type |= len | IXGBE_TXD_CMD;
-
-	tx_desc = IXGBEVF_TX_DESC(ring, i);
-	tx_desc->read.buffer_addr = cpu_to_le64(dma);
-
-	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
-	tx_desc->read.olinfo_status =
-			cpu_to_le32((len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
+		tx_desc->read.olinfo_status =
+			cpu_to_le32((full_len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
 				    IXGBE_ADVTXD_CC);
-
-	/* Avoid any potential race with cleanup */
-	smp_wmb();
-
-	/* set next_to_watch value indicating a packet is present */
-	i++;
-	if (i == ring->count)
-		i = 0;
-
-	tx_buffer->next_to_watch = tx_desc;
-	ring->next_to_use = i;
-
-	return IXGBEVF_XDP_TX;
-}
-
-static int ixgbevf_run_xdp(struct ixgbevf_adapter *adapter,
-			   struct ixgbevf_ring *rx_ring,
-			   struct xdp_buff *xdp)
-{
-	int result = IXGBEVF_XDP_PASS;
-	struct ixgbevf_ring *xdp_ring;
-	struct bpf_prog *xdp_prog;
-	u32 act;
-
-	xdp_prog = READ_ONCE(rx_ring->xdp_prog);
-
-	if (!xdp_prog)
-		goto xdp_out;
-
-	act = bpf_prog_run_xdp(xdp_prog, xdp);
-	switch (act) {
-	case XDP_PASS:
-		break;
-	case XDP_TX:
-		xdp_ring = adapter->xdp_ring[rx_ring->queue_index];
-		result = ixgbevf_xmit_xdp_ring(xdp_ring, xdp);
-		if (result == IXGBEVF_XDP_CONSUMED)
-			goto out_failure;
-		break;
-	default:
-		bpf_warn_invalid_xdp_action(rx_ring->netdev, xdp_prog, act);
-		fallthrough;
-	case XDP_ABORTED:
-out_failure:
-		trace_xdp_exception(rx_ring->netdev, xdp_prog, act);
-		fallthrough; /* handle aborts by dropping packet */
-	case XDP_DROP:
-		result = IXGBEVF_XDP_CONSUMED;
-		break;
 	}
-xdp_out:
-	return result;
+
+	tx_desc->read.buffer_addr = cpu_to_le64(desc.addr);
+	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
 }
 
-static unsigned int ixgbevf_rx_frame_truesize(struct ixgbevf_ring *rx_ring,
-					      unsigned int size)
+LIBETH_XDP_DEFINE_START();
+LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbevf_xdp_flush_tx, ixgbevf_prep_xdp_sq,
+			   ixgbevf_xdp_xmit_desc);
+LIBETH_XDP_DEFINE_FLUSH_XMIT(static ixgbevf_xdp_flush_xmit, ixgbevf_prep_xdp_sq,
+			     ixgbevf_xdp_xmit_desc);
+LIBETH_XDP_DEFINE_RUN_PROG(static ixgbevf_xdp_run_prog, ixgbevf_xdp_flush_tx);
+LIBETH_XDP_DEFINE_FINALIZE(static ixgbevf_xdp_finalize_xdp_napi,
+			   ixgbevf_xdp_flush_tx, ixgbevf_xdp_rs_and_bump);
+LIBETH_XDP_DEFINE_END();
+
+static u32 ixgbevf_rx_hsplit_wa(const struct libeth_fqe *hdr,
+				struct libeth_fqe *buf, u32 data_len)
 {
-	unsigned int truesize;
+	u32 copy = data_len <= L1_CACHE_BYTES ? data_len : ETH_HLEN;
+	struct page *hdr_page, *buf_page;
+	const void *src;
+	void *dst;
 
-#if (PAGE_SIZE < 8192)
-	truesize = ixgbevf_rx_pg_size(rx_ring) / 2; /* Must be power-of-2 */
-#else
-	truesize = ring_uses_build_skb(rx_ring) ?
-		SKB_DATA_ALIGN(IXGBEVF_SKB_PAD + size) +
-		SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) :
-		SKB_DATA_ALIGN(size);
-#endif
-	return truesize;
-}
+	if (unlikely(netmem_is_net_iov(buf->netmem)) ||
+	    !libeth_rx_sync_for_cpu(buf, copy))
+		return 0;
 
-static void ixgbevf_rx_buffer_flip(struct ixgbevf_ring *rx_ring,
-				   struct ixgbevf_rx_buffer *rx_buffer,
-				   unsigned int size)
-{
-	unsigned int truesize = ixgbevf_rx_frame_truesize(rx_ring, size);
+	hdr_page = __netmem_to_page(hdr->netmem);
+	buf_page = __netmem_to_page(buf->netmem);
 
-#if (PAGE_SIZE < 8192)
-	rx_buffer->page_offset ^= truesize;
-#else
-	rx_buffer->page_offset += truesize;
-#endif
+	dst = page_address(hdr_page) + hdr->offset +
+	      pp_page_to_nmdesc(hdr_page)->pp->p.offset;
+	src = page_address(buf_page) + buf->offset +
+	      pp_page_to_nmdesc(buf_page)->pp->p.offset;
+
+	memcpy(dst, src, LARGEST_ALIGN(copy));
+	buf->offset += copy;
+
+	return copy;
 }
 
 static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 				struct ixgbevf_ring *rx_ring,
 				int budget)
 {
-	unsigned int total_rx_bytes = 0, total_rx_packets = 0, frame_sz = 0;
+	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
 	struct ixgbevf_adapter *adapter = q_vector->adapter;
 	u16 cleaned_count = ixgbevf_desc_unused(rx_ring);
-	struct sk_buff *skb = rx_ring->skb;
-	bool xdp_xmit = false;
-	struct xdp_buff xdp;
-	int xdp_res = 0;
+	LIBETH_XDP_ONSTACK_BULK(xdp_tx_bulk);
+	LIBETH_XDP_ONSTACK_BUFF(xdp);
 
-	/* Frame size depend on rx_ring setup when PAGE_SIZE=4K */
-#if (PAGE_SIZE < 8192)
-	frame_sz = ixgbevf_rx_frame_truesize(rx_ring, 0);
-#endif
-	xdp_init_buff(&xdp, frame_sz, &rx_ring->xdp_rxq);
+	libeth_xdp_init_buff(xdp, &rx_ring->xdp_stash, &rx_ring->xdp_rxq);
+	libeth_xdp_tx_init_bulk(&xdp_tx_bulk, rx_ring->xdp_prog,
+				adapter->netdev, adapter->xdp_ring,
+				adapter->num_xdp_queues);
 
 	while (likely(total_rx_packets < budget)) {
-		struct ixgbevf_rx_buffer *rx_buffer;
 		union ixgbe_adv_rx_desc *rx_desc;
+		struct libeth_fqe *rx_buffer;
+		struct sk_buff *skb;
 		unsigned int size;
 
 		/* return some buffers to hardware, one at a time is too slow */
@@ -1144,7 +608,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 
 		rx_desc = IXGBEVF_RX_DESC(rx_ring, rx_ring->next_to_clean);
 		size = le16_to_cpu(rx_desc->wb.upper.length);
-		if (!size)
+		if (unlikely(!size))
 			break;
 
 		/* This memory barrier is needed to keep us from reading
@@ -1153,73 +617,63 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		 */
 		rmb();
 
-		rx_buffer = ixgbevf_get_rx_buffer(rx_ring, size);
+		rx_buffer = &rx_ring->rx_fqes[rx_ring->next_to_clean];
 
-		/* retrieve a buffer from the ring */
-		if (!skb) {
-			unsigned int offset = ixgbevf_rx_offset(rx_ring);
-			unsigned char *hard_start;
+		if (unlikely(rx_ring->hdr_pp)) {
+			struct libeth_fqe *hdr_buff;
+			unsigned int hdr_size = 0;
 
-			hard_start = page_address(rx_buffer->page) +
-				     rx_buffer->page_offset - offset;
-			xdp_prepare_buff(&xdp, hard_start, offset, size, true);
-#if (PAGE_SIZE > 4096)
-			/* At larger PAGE_SIZE, frame_sz depend on len size */
-			xdp.frame_sz = ixgbevf_rx_frame_truesize(rx_ring, size);
-#endif
-			xdp_res = ixgbevf_run_xdp(adapter, rx_ring, &xdp);
-		}
+			hdr_buff = &rx_ring->hdr_fqes[rx_ring->next_to_clean];
 
-		if (xdp_res) {
-			if (xdp_res == IXGBEVF_XDP_TX) {
-				xdp_xmit = true;
-				ixgbevf_rx_buffer_flip(rx_ring, rx_buffer,
-						       size);
-			} else {
-				rx_buffer->pagecnt_bias++;
+			if (!xdp->data) {
+				hdr_size = ixgbevf_rx_hsplit_wa(hdr_buff,
+								rx_buffer,
+								size);
+				size -= hdr_size ? : size;
 			}
-			total_rx_packets++;
-			total_rx_bytes += size;
-		} else if (skb) {
-			ixgbevf_add_rx_frag(rx_ring, rx_buffer, skb, size);
-		} else if (ring_uses_build_skb(rx_ring)) {
-			skb = ixgbevf_build_skb(rx_ring, rx_buffer,
-						&xdp, rx_desc);
-		} else {
-			skb = ixgbevf_construct_skb(rx_ring, rx_buffer,
-						    &xdp, rx_desc);
+
+			libeth_xdp_process_buff(xdp, hdr_buff, hdr_size);
 		}
+
+		libeth_xdp_process_buff(xdp, rx_buffer, size);
+
+		cleaned_count++;
+		/* fetch next buffer in frame if non-eop */
+		if (ixgbevf_is_non_eop(rx_ring, rx_desc) ||
+		    unlikely(!xdp->data))
+			continue;
+
+		total_rx_packets++;
+		total_rx_bytes += xdp_get_buff_len(&xdp->base);
+
+		if (xdp_tx_bulk.prog &&
+		    !ixgbevf_xdp_run_prog(xdp, &xdp_tx_bulk))
+			continue;
+
+		skb = xdp_build_skb_from_buff(&xdp->base);
 
 		/* exit if we failed to retrieve a buffer */
-		if (!xdp_res && !skb) {
+		if (unlikely(!skb)) {
+			libeth_xdp_return_buff_slow(xdp);
 			rx_ring->rx_stats.alloc_rx_buff_failed++;
-			rx_buffer->pagecnt_bias++;
 			break;
 		}
 
-		ixgbevf_put_rx_buffer(rx_ring, rx_buffer, skb);
-		cleaned_count++;
-
-		/* fetch next buffer in frame if non-eop */
-		if (ixgbevf_is_non_eop(rx_ring, rx_desc))
-			continue;
+		xdp->data = NULL;
 
 		/* verify the packet layout is correct */
-		if (xdp_res || ixgbevf_cleanup_headers(rx_ring, rx_desc, skb)) {
+		if (unlikely(ixgbevf_cleanup_headers(rx_ring, rx_desc, skb))) {
 			skb = NULL;
 			continue;
 		}
 
-		/* probably a little skewed due to removing CRC */
-		total_rx_bytes += skb->len;
-
 		/* Workaround hardware that can't do proper VEPA multicast
 		 * source pruning.
 		 */
-		if ((skb->pkt_type == PACKET_BROADCAST ||
-		     skb->pkt_type == PACKET_MULTICAST) &&
-		    ether_addr_equal(rx_ring->netdev->dev_addr,
-				     eth_hdr(skb)->h_source)) {
+		if (unlikely((skb->pkt_type == PACKET_BROADCAST ||
+			      skb->pkt_type == PACKET_MULTICAST) &&
+			     ether_addr_equal(rx_ring->netdev->dev_addr,
+					      eth_hdr(skb)->h_source))) {
 			dev_kfree_skb_irq(skb);
 			continue;
 		}
@@ -1227,28 +681,13 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		/* populate checksum, VLAN, and protocol */
 		ixgbevf_process_skb_fields(rx_ring, rx_desc, skb);
 
-		ixgbevf_rx_skb(q_vector, skb);
-
-		/* reset skb pointer */
-		skb = NULL;
-
-		/* update budget accounting */
-		total_rx_packets++;
+		napi_gro_receive(&q_vector->napi, skb);
 	}
 
 	/* place incomplete frames back on ring for completion */
-	rx_ring->skb = skb;
+	libeth_xdp_save_buff(&rx_ring->xdp_stash, xdp);
 
-	if (xdp_xmit) {
-		struct ixgbevf_ring *xdp_ring =
-			adapter->xdp_ring[rx_ring->queue_index];
-
-		/* Force memory writes to complete before letting h/w
-		 * know there are new descriptors to fetch.
-		 */
-		wmb();
-		ixgbevf_write_tail(xdp_ring, xdp_ring->next_to_use);
-	}
+	ixgbevf_xdp_finalize_xdp_napi(&xdp_tx_bulk);
 
 	u64_stats_update_begin(&rx_ring->syncp);
 	rx_ring->stats.packets += total_rx_packets;
@@ -1258,6 +697,23 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 	q_vector->rx.total_bytes += total_rx_bytes;
 
 	return total_rx_packets;
+}
+
+static int ixgbevf_xdp_xmit(struct net_device *dev, int n,
+			    struct xdp_frame **frames, u32 flags)
+{
+	struct ixgbevf_adapter *adapter = netdev_priv(dev);
+
+	if (unlikely(test_bit(__IXGBEVF_DOWN, &adapter->state)))
+		return -ENETDOWN;
+
+	if (unlikely(!adapter->num_xdp_queues))
+		return -ENXIO;
+
+	return libeth_xdp_xmit_do_bulk(dev, n, frames, flags, adapter->xdp_ring,
+				       adapter->num_xdp_queues,
+				       ixgbevf_xdp_flush_xmit,
+				       ixgbevf_xdp_rs_and_bump);
 }
 
 /**
@@ -1278,8 +734,13 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 	bool clean_complete = true;
 
 	ixgbevf_for_each_ring(ring, q_vector->tx) {
-		if (!ixgbevf_clean_tx_irq(q_vector, ring, budget))
-			clean_complete = false;
+		if (ring_is_xsk(ring))
+			clean_complete &=
+				ixgbevf_clean_xsk_tx_irq(q_vector, ring,
+							 budget);
+		else if (!ring_is_xdp(ring))
+			clean_complete &=
+				ixgbevf_clean_tx_irq(q_vector, ring, budget);
 	}
 
 	if (budget <= 0)
@@ -1294,7 +755,10 @@ static int ixgbevf_poll(struct napi_struct *napi, int budget)
 		per_ring_budget = budget;
 
 	ixgbevf_for_each_ring(ring, q_vector->rx) {
-		int cleaned = ixgbevf_clean_rx_irq(q_vector, ring,
+		int cleaned = ring_is_xsk(ring) ?
+			      ixgbevf_clean_xsk_rx_irq(q_vector, ring,
+						       per_ring_budget) :
+			      ixgbevf_clean_rx_irq(q_vector, ring,
 						   per_ring_budget);
 		work_done += cleaned;
 		if (cleaned >= per_ring_budget)
@@ -1666,7 +1130,7 @@ static inline void ixgbevf_irq_disable(struct ixgbevf_adapter *adapter)
  * ixgbevf_irq_enable - Enable default interrupt generation settings
  * @adapter: board private structure
  **/
-static inline void ixgbevf_irq_enable(struct ixgbevf_adapter *adapter)
+void ixgbevf_irq_enable(struct ixgbevf_adapter *adapter)
 {
 	struct ixgbe_hw *hw = &adapter->hw;
 
@@ -1676,14 +1140,32 @@ static inline void ixgbevf_irq_enable(struct ixgbevf_adapter *adapter)
 }
 
 /**
+ * ixgbevf_xsk_pool_from_q - get ZC XSK buffer pool bound to a queue ID
+ * @ring: Rx or Tx ring
+ *
+ * Return: A pointer to xsk_buff_pool structure if there is a buffer pool
+ * attached, configured as zero-copy, and usable by this queue, NULL otherwise.
+ */
+static struct xsk_buff_pool *ixgbevf_xsk_pool_from_q(struct ixgbevf_ring *ring)
+{
+	struct xsk_buff_pool *pool =
+		xsk_get_pool_from_qid(ring->netdev, ring->queue_index);
+
+	if (!rcu_access_pointer(ring->xdp_prog) && !ring_is_xdp(ring))
+		return NULL;
+
+	return (pool && pool->dev) ? pool : NULL;
+}
+
+/**
  * ixgbevf_configure_tx_ring - Configure 82599 VF Tx ring after Reset
  * @adapter: board private structure
  * @ring: structure containing ring specific data
  *
  * Configure the Tx descriptor ring after a reset.
  **/
-static void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
-				      struct ixgbevf_ring *ring)
+void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
+			       struct ixgbevf_ring *ring)
 {
 	struct ixgbe_hw *hw = &adapter->hw;
 	u64 tdba = ring->dma;
@@ -1717,6 +1199,8 @@ static void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 	/* reset ntu and ntc to place SW in sync with hardwdare */
 	ring->next_to_clean = 0;
 	ring->next_to_use = 0;
+	ring->pending = 0;
+	ring->cached_ntu = 0;
 
 	/* In order to avoid issues WTHRESH + PTHRESH should always be equal
 	 * to or less than the number of on chip descriptors, which is
@@ -1729,8 +1213,24 @@ static void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 		   32;           /* PTHRESH = 32 */
 
 	/* reinitialize tx_buffer_info */
-	memset(ring->tx_buffer_info, 0,
-	       sizeof(struct ixgbevf_tx_buffer) * ring->count);
+	if (!ring_is_xdp(ring)) {
+		memset(ring->tx_buffer_info, 0,
+		       sizeof(struct ixgbevf_tx_buffer) * ring->count);
+	} else {
+		memset(ring->xdp_sqes, 0,
+		       sizeof(struct libeth_sqe) * ring->count);
+		libeth_xdpsq_get(&ring->xdpq_lock, ring->netdev,
+				 num_possible_cpus() > adapter->num_xdp_queues);
+	}
+
+	ring->xsk_pool = ixgbevf_xsk_pool_from_q(ring);
+	if (ring_is_xdp(ring) && ring->xsk_pool)
+		set_ring_xsk(ring);
+	else
+		clear_ring_xsk(ring);
+
+	ring->thresh = ring_is_xsk(ring) ? IXGBEVF_XSK_TX_CLEAN_THRESH(ring) :
+					   XDP_BULK_QUEUE_SIZE;
 
 	clear_bit(__IXGBEVF_HANG_CHECK_ARMED, &ring->state);
 	clear_bit(__IXGBEVF_TX_XDP_RING_PRIMED, &ring->state);
@@ -1766,7 +1266,8 @@ static void ixgbevf_configure_tx(struct ixgbevf_adapter *adapter)
 #define IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT	2
 
 static void ixgbevf_configure_srrctl(struct ixgbevf_adapter *adapter,
-				     struct ixgbevf_ring *ring, int index)
+				     struct ixgbevf_ring *ring, int index,
+				     bool rlpml_valid)
 {
 	struct ixgbe_hw *hw = &adapter->hw;
 	u32 srrctl;
@@ -1774,10 +1275,11 @@ static void ixgbevf_configure_srrctl(struct ixgbevf_adapter *adapter,
 	srrctl = IXGBE_SRRCTL_DROP_EN;
 
 	srrctl |= IXGBEVF_RX_HDR_SIZE << IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT;
-	if (ring_uses_large_buffer(ring))
-		srrctl |= IXGBEVF_RXBUFFER_3072 >> IXGBE_SRRCTL_BSIZEPKT_SHIFT;
+	if (rlpml_valid)
+		srrctl |= DIV_ROUND_UP(ring->rx_buf_len,
+				       IXGBE_SRRCTL_BSIZEPKT_STEP);
 	else
-		srrctl |= IXGBEVF_RXBUFFER_2048 >> IXGBE_SRRCTL_BSIZEPKT_SHIFT;
+		srrctl |= ring->rx_buf_len / IXGBE_SRRCTL_BSIZEPKT_STEP;
 	srrctl |= IXGBE_SRRCTL_DESCTYPE_ADV_ONEBUF;
 
 	IXGBE_WRITE_REG(hw, IXGBE_VFSRRCTL(index), srrctl);
@@ -1799,8 +1301,8 @@ static void ixgbevf_setup_psrtype(struct ixgbevf_adapter *adapter)
 }
 
 #define IXGBEVF_MAX_RX_DESC_POLL 10
-static void ixgbevf_disable_rx_queue(struct ixgbevf_adapter *adapter,
-				     struct ixgbevf_ring *ring)
+void ixgbevf_disable_rx_queue(struct ixgbevf_adapter *adapter,
+			      struct ixgbevf_ring *ring)
 {
 	struct ixgbe_hw *hw = &adapter->hw;
 	int wait_loop = IXGBEVF_MAX_RX_DESC_POLL;
@@ -1824,10 +1326,15 @@ static void ixgbevf_disable_rx_queue(struct ixgbevf_adapter *adapter,
 	if (!wait_loop)
 		pr_err("RXDCTL.ENABLE queue %d not cleared while polling\n",
 		       reg_idx);
+
+	/* Specification calls for 100 usec of delay after
+	 * RXDCTL.ENABLE is cleared
+	 */
+	usleep_range(100, 200);
 }
 
-static void ixgbevf_rx_desc_queue_enable(struct ixgbevf_adapter *adapter,
-					 struct ixgbevf_ring *ring)
+void ixgbevf_rx_desc_queue_enable(struct ixgbevf_adapter *adapter,
+				  struct ixgbevf_ring *ring)
 {
 	struct ixgbe_hw *hw = &adapter->hw;
 	int wait_loop = IXGBEVF_MAX_RX_DESC_POLL;
@@ -1903,14 +1410,163 @@ static void ixgbevf_setup_vfmrqc(struct ixgbevf_adapter *adapter)
 	IXGBE_WRITE_REG(hw, IXGBE_VFMRQC, vfmrqc);
 }
 
-static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
-				      struct ixgbevf_ring *ring)
+void ixgbevf_rx_destroy_pp(struct ixgbevf_ring *rx_ring)
+{
+	struct libeth_fq fq = {
+		.pp	= rx_ring->pp,
+		.fqes	= rx_ring->rx_fqes,
+	};
+
+	if (!fq.pp && !rx_ring->xsk_fqes)
+		return;
+
+	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq)) {
+		xdp_rxq_info_detach_mem_model(&rx_ring->xdp_rxq);
+		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
+	}
+
+	if (test_and_clear_bit(__IXGBEVF_RXTX_XSK_RING, &rx_ring->state)) {
+		struct libeth_xskfq xskfq = {
+			.fqes = rx_ring->xsk_fqes,
+		};
+
+		libeth_xskfq_destroy(&xskfq);
+		rx_ring->xsk_fqes = NULL;
+		rx_ring->pending = xskfq.pending;
+		rx_ring->thresh = xskfq.thresh;
+		rx_ring->rx_buf_len = xskfq.buf_len;
+		rx_ring->xsk_pool = NULL;
+
+		return;
+	}
+
+	libeth_rx_fq_destroy(&fq);
+	rx_ring->rx_fqes = NULL;
+	rx_ring->pp = NULL;
+
+	if (!rx_ring->hdr_pp)
+		return;
+
+	fq = (struct libeth_fq) {
+		.pp	= rx_ring->hdr_pp,
+		.fqes	= rx_ring->hdr_fqes,
+	};
+
+	libeth_rx_fq_destroy(&fq);
+	rx_ring->hdr_fqes = NULL;
+	rx_ring->hdr_pp = NULL;
+}
+
+static int ixgbevf_rx_create_pp(struct ixgbevf_ring *rx_ring)
+{
+	u32 adapter_flags = rx_ring->q_vector->adapter->flags;
+	struct libeth_fq fq = {
+		.count		= rx_ring->count,
+		.nid		= NUMA_NO_NODE,
+		.type		= LIBETH_FQE_MTU,
+		.xdp		= !!rx_ring->xdp_prog,
+		.buf_len	= IXGBEVF_RX_PAGE_LEN(rx_ring->xdp_prog ?
+						      LIBETH_XDP_HEADROOM :
+						      LIBETH_SKB_HEADROOM),
+	};
+	struct xsk_buff_pool *pool;
+	u32 frame_size;
+	int ret;
+
+	pool = ixgbevf_xsk_pool_from_q(rx_ring);
+	if (pool) {
+		u32 frag_sz = xsk_pool_get_rx_frag_step(pool);
+		struct libeth_xskfq xskfq = {
+			.nid = numa_node_id(),
+			.count = rx_ring->count,
+			.pool = pool,
+		};
+
+		ret = libeth_xskfq_create(&xskfq);
+		if (ret)
+			return ret;
+
+		rx_ring->xsk_pool = xskfq.pool;
+		rx_ring->xsk_fqes = xskfq.fqes;
+		rx_ring->pending = xskfq.count - 1;
+		rx_ring->thresh = xskfq.thresh;
+		rx_ring->rx_buf_len = xskfq.buf_len;
+		set_ring_xsk(rx_ring);
+
+		ret = __xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
+					 rx_ring->queue_index, 0, frag_sz);
+		if (ret)
+			goto err;
+
+		ret = xdp_rxq_info_reg_mem_model(&rx_ring->xdp_rxq,
+						 MEM_TYPE_XSK_BUFF_POOL,
+						 rx_ring->xsk_pool);
+		if (ret)
+			goto err;
+
+		return 0;
+	}
+
+	/* Some HW requires DMA write sizes to be aligned to 1K,
+	 * which warrants fake header split usage, but this is
+	 * not an issue if the frame size is at its maximum of 3K
+	 */
+	frame_size =
+		IXGBEVF_RX_SRRCTL_BUF_SIZE(READ_ONCE(rx_ring->netdev->mtu));
+	fq.hsplit = (adapter_flags & IXGBEVF_FLAG_HSPLIT) &&
+		    frame_size < fq.buf_len;
+	ret = libeth_rx_fq_create(&fq, &rx_ring->q_vector->napi);
+	if (ret)
+		return ret;
+
+	rx_ring->pp = fq.pp;
+	rx_ring->rx_fqes = fq.fqes;
+	rx_ring->truesize = fq.truesize;
+	rx_ring->rx_buf_len = fq.buf_len;
+
+	/* XDP RX-queue info */
+	ret = __xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
+				 rx_ring->queue_index, 0, rx_ring->truesize);
+	if (ret)
+		goto err;
+
+	xdp_rxq_info_attach_page_pool(&rx_ring->xdp_rxq, rx_ring->pp);
+
+	if (!fq.hsplit)
+		return 0;
+
+	fq = (struct libeth_fq) {
+		.count		= rx_ring->count,
+		.nid		= NUMA_NO_NODE,
+		.type		= LIBETH_FQE_HDR,
+		.xdp		= !!rx_ring->xdp_prog,
+	};
+
+	ret = libeth_rx_fq_create(&fq, &rx_ring->q_vector->napi);
+	if (ret)
+		goto err;
+
+	rx_ring->hdr_pp = fq.pp;
+	rx_ring->hdr_fqes = fq.fqes;
+	rx_ring->hdr_truesize = fq.truesize;
+
+	return 0;
+
+err:
+	ixgbevf_rx_destroy_pp(rx_ring);
+	return ret;
+}
+
+void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
+			       struct ixgbevf_ring *ring)
 {
 	struct ixgbe_hw *hw = &adapter->hw;
 	union ixgbe_adv_rx_desc *rx_desc;
+	u8 reg_idx = ring->reg_idx;
+	bool rlpml_valid = false;
 	u64 rdba = ring->dma;
 	u32 rxdctl;
-	u8 reg_idx = ring->reg_idx;
+	int err;
 
 	/* disable queue to avoid issues while updating state */
 	rxdctl = IXGBE_READ_REG(hw, IXGBE_VFRXDCTL(reg_idx));
@@ -1936,10 +1592,6 @@ static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
 	IXGBE_WRITE_REG(hw, IXGBE_VFRDT(reg_idx), 0);
 	ring->tail = adapter->io_addr + IXGBE_VFRDT(reg_idx);
 
-	/* initialize rx_buffer_info */
-	memset(ring->rx_buffer_info, 0,
-	       sizeof(struct ixgbevf_rx_buffer) * ring->count);
-
 	/* initialize Rx descriptor 0 */
 	rx_desc = IXGBEVF_RX_DESC(ring, 0);
 	rx_desc->wb.upper.length = 0;
@@ -1947,53 +1599,40 @@ static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
 	/* reset ntu and ntc to place SW in sync with hardwdare */
 	ring->next_to_clean = 0;
 	ring->next_to_use = 0;
-	ring->next_to_alloc = 0;
+	ring->pending = ixgbevf_desc_unused(ring);
 
-	ixgbevf_configure_srrctl(adapter, ring, reg_idx);
+	err = ixgbevf_rx_create_pp(ring);
+	if (err) {
+		netdev_err(ring->netdev,
+			   "Failed to create Page Pool for buffer allocation: (%pe), RxQ %d is disabled, driver reload may be needed\n",
+			   ERR_PTR(err), ring->queue_index);
+		return;
+	}
 
 	/* RXDCTL.RLPML does not work on 82599 */
 	if (adapter->hw.mac.type != ixgbe_mac_82599_vf) {
-		rxdctl &= ~(IXGBE_RXDCTL_RLPMLMASK |
-			    IXGBE_RXDCTL_RLPML_EN);
+		u32 pkt_len =
+			READ_ONCE(adapter->netdev->mtu) + LIBETH_RX_LL_LEN;
 
-#if (PAGE_SIZE < 8192)
-		/* Limit the maximum frame size so we don't overrun the skb */
-		if (ring_uses_build_skb(ring) &&
-		    !ring_uses_large_buffer(ring))
-			rxdctl |= IXGBEVF_MAX_FRAME_BUILD_SKB |
-				  IXGBE_RXDCTL_RLPML_EN;
-#endif
+		rxdctl &= ~(IXGBE_RXDCTL_RLPMLMASK | IXGBE_RXDCTL_RLPML_EN);
+		if (pkt_len <= IXGBE_RXDCTL_RLPMLMASK) {
+			rxdctl |= pkt_len | IXGBE_RXDCTL_RLPML_EN;
+			if (pkt_len <= ring->rx_buf_len)
+				rlpml_valid = true;
+		}
 	}
+
+	ixgbevf_configure_srrctl(adapter, ring, reg_idx, rlpml_valid);
 
 	rxdctl |= IXGBE_RXDCTL_ENABLE | IXGBE_RXDCTL_VME;
 	IXGBE_WRITE_REG(hw, IXGBE_VFRXDCTL(reg_idx), rxdctl);
 
 	ixgbevf_rx_desc_queue_enable(adapter, ring);
-	ixgbevf_alloc_rx_buffers(ring, ixgbevf_desc_unused(ring));
-}
 
-static void ixgbevf_set_rx_buffer_len(struct ixgbevf_adapter *adapter,
-				      struct ixgbevf_ring *rx_ring)
-{
-	struct net_device *netdev = adapter->netdev;
-	unsigned int max_frame = netdev->mtu + ETH_HLEN + ETH_FCS_LEN;
-
-	/* set build_skb and buffer size flags */
-	clear_ring_build_skb_enabled(rx_ring);
-	clear_ring_uses_large_buffer(rx_ring);
-
-	if (adapter->flags & IXGBEVF_FLAGS_LEGACY_RX)
-		return;
-
-	if (PAGE_SIZE < 8192)
-		if (max_frame > IXGBEVF_MAX_FRAME_BUILD_SKB)
-			set_ring_uses_large_buffer(rx_ring);
-
-	/* 82599 can't rely on RXDCTL.RLPML to restrict the size of the frame */
-	if (adapter->hw.mac.type == ixgbe_mac_82599_vf && !ring_uses_large_buffer(rx_ring))
-		return;
-
-	set_ring_build_skb_enabled(rx_ring);
+	if (ring_is_xsk(ring))
+		ixgbevf_xsk_alloc_rx_bufs(ring, ring->pending);
+	else
+		ixgbevf_alloc_rx_buffers(ring, ring->pending);
 }
 
 /**
@@ -2026,7 +1665,6 @@ static void ixgbevf_configure_rx(struct ixgbevf_adapter *adapter)
 	for (i = 0; i < adapter->num_rx_queues; i++) {
 		struct ixgbevf_ring *rx_ring = adapter->rx_ring[i];
 
-		ixgbevf_set_rx_buffer_len(adapter, rx_ring);
 		ixgbevf_configure_rx_ring(adapter, rx_ring);
 	}
 }
@@ -2383,56 +2021,41 @@ void ixgbevf_up(struct ixgbevf_adapter *adapter)
  * ixgbevf_clean_rx_ring - Free Rx Buffers per Queue
  * @rx_ring: ring to free buffers from
  **/
-static void ixgbevf_clean_rx_ring(struct ixgbevf_ring *rx_ring)
+void ixgbevf_clean_rx_ring(struct ixgbevf_ring *rx_ring)
 {
-	u16 i = rx_ring->next_to_clean;
-
-	/* Free Rx ring sk_buff */
-	if (rx_ring->skb) {
-		dev_kfree_skb(rx_ring->skb);
-		rx_ring->skb = NULL;
+	if (ring_is_xsk(rx_ring)) {
+		ixgbevf_rx_xsk_ring_free_buffs(rx_ring);
+		goto reset;
 	}
 
+	/* Free Rx ring sk_buff */
+	libeth_xdp_return_stash(&rx_ring->xdp_stash);
+
 	/* Free all the Rx ring pages */
-	while (i != rx_ring->next_to_alloc) {
-		struct ixgbevf_rx_buffer *rx_buffer;
+	for (u32 i = rx_ring->next_to_clean; i != rx_ring->next_to_use; ) {
+		const struct libeth_fqe *rx_fqe = &rx_ring->rx_fqes[i];
+		const struct libeth_fqe *hdr_fqe = rx_ring->hdr_fqes ?
+						   &rx_ring->hdr_fqes[i] :
+						   NULL;
 
-		rx_buffer = &rx_ring->rx_buffer_info[i];
-
-		/* Invalidate cache lines that may have been written to by
-		 * device so that we avoid corrupting memory.
-		 */
-		dma_sync_single_range_for_cpu(rx_ring->dev,
-					      rx_buffer->dma,
-					      rx_buffer->page_offset,
-					      ixgbevf_rx_bufsz(rx_ring),
-					      DMA_FROM_DEVICE);
-
-		/* free resources associated with mapping */
-		dma_unmap_page_attrs(rx_ring->dev,
-				     rx_buffer->dma,
-				     ixgbevf_rx_pg_size(rx_ring),
-				     DMA_FROM_DEVICE,
-				     IXGBEVF_RX_DMA_ATTR);
-
-		__page_frag_cache_drain(rx_buffer->page,
-					rx_buffer->pagecnt_bias);
-
-		i++;
-		if (i == rx_ring->count)
+		libeth_rx_recycle_slow(rx_fqe->netmem);
+		if (hdr_fqe)
+			libeth_rx_recycle_slow(hdr_fqe->netmem);
+		if (unlikely(++i == rx_ring->count))
 			i = 0;
 	}
 
-	rx_ring->next_to_alloc = 0;
+reset:
 	rx_ring->next_to_clean = 0;
 	rx_ring->next_to_use = 0;
+	rx_ring->pending = 0;
 }
 
 /**
  * ixgbevf_clean_tx_ring - Free Tx Buffers
  * @tx_ring: ring to be cleaned
  **/
-static void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring)
+void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring)
 {
 	u16 i = tx_ring->next_to_clean;
 	struct ixgbevf_tx_buffer *tx_buffer = &tx_ring->tx_buffer_info[i];
@@ -2441,10 +2064,7 @@ static void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring)
 		union ixgbe_adv_tx_desc *eop_desc, *tx_desc;
 
 		/* Free all the Tx ring sk_buffs */
-		if (ring_is_xdp(tx_ring))
-			page_frag_free(tx_buffer->data);
-		else
-			dev_kfree_skb_any(tx_buffer->skb);
+		dev_kfree_skb_any(tx_buffer->skb);
 
 		/* unmap skb header data */
 		dma_unmap_single(tx_ring->dev,
@@ -2498,8 +2118,10 @@ static void ixgbevf_clean_all_rx_rings(struct ixgbevf_adapter *adapter)
 {
 	int i;
 
-	for (i = 0; i < adapter->num_rx_queues; i++)
+	for (i = 0; i < adapter->num_rx_queues; i++) {
 		ixgbevf_clean_rx_ring(adapter->rx_ring[i]);
+		ixgbevf_rx_destroy_pp(adapter->rx_ring[i]);
+	}
 }
 
 /**
@@ -2513,13 +2135,20 @@ static void ixgbevf_clean_all_tx_rings(struct ixgbevf_adapter *adapter)
 	for (i = 0; i < adapter->num_tx_queues; i++)
 		ixgbevf_clean_tx_ring(adapter->tx_ring[i]);
 	for (i = 0; i < adapter->num_xdp_queues; i++)
-		ixgbevf_clean_tx_ring(adapter->xdp_ring[i]);
+		ixgbevf_clean_xdp_ring(adapter->xdp_ring[i]);
+}
+
+void ixgbevf_flush_tx_queue(struct ixgbevf_ring *ring)
+{
+	u8 reg_idx = ring->reg_idx;
+
+	IXGBE_WRITE_REG(&ring->q_vector->adapter->hw, IXGBE_VFTXDCTL(reg_idx),
+			IXGBE_TXDCTL_SWFLSH);
 }
 
 void ixgbevf_down(struct ixgbevf_adapter *adapter)
 {
 	struct net_device *netdev = adapter->netdev;
-	struct ixgbe_hw *hw = &adapter->hw;
 	int i;
 
 	/* signal that we are down to the interrupt handler */
@@ -2545,19 +2174,11 @@ void ixgbevf_down(struct ixgbevf_adapter *adapter)
 	timer_delete_sync(&adapter->service_timer);
 
 	/* disable transmits in the hardware now that interrupts are off */
-	for (i = 0; i < adapter->num_tx_queues; i++) {
-		u8 reg_idx = adapter->tx_ring[i]->reg_idx;
+	for (i = 0; i < adapter->num_tx_queues; i++)
+		ixgbevf_flush_tx_queue(adapter->tx_ring[i]);
 
-		IXGBE_WRITE_REG(hw, IXGBE_VFTXDCTL(reg_idx),
-				IXGBE_TXDCTL_SWFLSH);
-	}
-
-	for (i = 0; i < adapter->num_xdp_queues; i++) {
-		u8 reg_idx = adapter->xdp_ring[i]->reg_idx;
-
-		IXGBE_WRITE_REG(hw, IXGBE_VFTXDCTL(reg_idx),
-				IXGBE_TXDCTL_SWFLSH);
-	}
+	for (i = 0; i < adapter->num_xdp_queues; i++)
+		ixgbevf_flush_tx_queue(adapter->xdp_ring[i]);
 
 	if (!pci_channel_offline(adapter->pdev))
 		ixgbevf_reset(adapter);
@@ -2840,7 +2461,6 @@ static int ixgbevf_alloc_q_vector(struct ixgbevf_adapter *adapter, int v_idx,
 
 	while (rxr_count) {
 		/* assign generic ring traits */
-		ring->dev = &adapter->pdev->dev;
 		ring->netdev = adapter->netdev;
 
 		/* configure backlink on ring */
@@ -3084,6 +2704,9 @@ static int ixgbevf_sw_init(struct ixgbevf_adapter *adapter)
 			goto out;
 	}
 
+	if (adapter->hw.mac.type == ixgbe_mac_82599_vf)
+		adapter->flags |= IXGBEVF_FLAG_HSPLIT;
+
 	/* assume legacy case in which PF would only give VF 2 queues */
 	hw->mac.max_tx_queues = 2;
 	hw->mac.max_rx_queues = 2;
@@ -3259,8 +2882,6 @@ static void ixgbevf_check_hang_subtask(struct ixgbevf_adapter *adapter)
 	if (netif_carrier_ok(adapter->netdev)) {
 		for (i = 0; i < adapter->num_tx_queues; i++)
 			set_check_for_tx_hang(adapter->tx_ring[i]);
-		for (i = 0; i < adapter->num_xdp_queues; i++)
-			set_check_for_tx_hang(adapter->xdp_ring[i]);
 	}
 
 	/* get one bit for every active Tx/Rx interrupt vector */
@@ -3404,7 +3025,10 @@ static void ixgbevf_service_task(struct work_struct *work)
  **/
 void ixgbevf_free_tx_resources(struct ixgbevf_ring *tx_ring)
 {
-	ixgbevf_clean_tx_ring(tx_ring);
+	if (!ring_is_xdp(tx_ring))
+		ixgbevf_clean_tx_ring(tx_ring);
+	else
+		ixgbevf_clean_xdp_ring(tx_ring);
 
 	vfree(tx_ring->tx_buffer_info);
 	tx_ring->tx_buffer_info = NULL;
@@ -3413,7 +3037,7 @@ void ixgbevf_free_tx_resources(struct ixgbevf_ring *tx_ring)
 	if (!tx_ring->desc)
 		return;
 
-	dma_free_coherent(tx_ring->dev, tx_ring->size, tx_ring->desc,
+	dma_free_coherent(tx_ring->dev, tx_ring->dma_size, tx_ring->desc,
 			  tx_ring->dma);
 
 	tx_ring->desc = NULL;
@@ -3448,7 +3072,9 @@ int ixgbevf_setup_tx_resources(struct ixgbevf_ring *tx_ring)
 	struct ixgbevf_adapter *adapter = netdev_priv(tx_ring->netdev);
 	int size;
 
-	size = sizeof(struct ixgbevf_tx_buffer) * tx_ring->count;
+	size = (!ring_is_xdp(tx_ring) ? sizeof(struct ixgbevf_tx_buffer) :
+		sizeof(struct libeth_sqe)) * tx_ring->count;
+
 	tx_ring->tx_buffer_info = vmalloc(size);
 	if (!tx_ring->tx_buffer_info)
 		goto err;
@@ -3456,10 +3082,10 @@ int ixgbevf_setup_tx_resources(struct ixgbevf_ring *tx_ring)
 	u64_stats_init(&tx_ring->syncp);
 
 	/* round up to nearest 4K */
-	tx_ring->size = tx_ring->count * sizeof(union ixgbe_adv_tx_desc);
-	tx_ring->size = ALIGN(tx_ring->size, 4096);
+	tx_ring->dma_size = tx_ring->count * sizeof(union ixgbe_adv_tx_desc);
+	tx_ring->dma_size = ALIGN(tx_ring->dma_size, 4096);
 
-	tx_ring->desc = dma_alloc_coherent(tx_ring->dev, tx_ring->size,
+	tx_ring->desc = dma_alloc_coherent(tx_ring->dev, tx_ring->dma_size,
 					   &tx_ring->dma, GFP_KERNEL);
 	if (!tx_ring->desc)
 		goto err;
@@ -3514,48 +3140,40 @@ err_setup_tx:
 	return err;
 }
 
+static struct device *ixgbevf_dma_dev_from_ring(struct ixgbevf_ring *ring)
+{
+	return &ring->q_vector->adapter->pdev->dev;
+}
+
 /**
- * ixgbevf_setup_rx_resources - allocate Rx resources (Descriptors)
+ * ixgbevf_setup_rx_resources - allocate Rx resources
  * @adapter: board private structure
  * @rx_ring: Rx descriptor ring (for a specific queue) to setup
  *
- * Returns 0 on success, negative on failure
+ * Returns: 0 on success, negative on failure.
  **/
 int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 			       struct ixgbevf_ring *rx_ring)
 {
-	int size;
-
-	size = sizeof(struct ixgbevf_rx_buffer) * rx_ring->count;
-	rx_ring->rx_buffer_info = vmalloc(size);
-	if (!rx_ring->rx_buffer_info)
-		goto err;
-
 	u64_stats_init(&rx_ring->syncp);
 
 	/* Round up to nearest 4K */
-	rx_ring->size = rx_ring->count * sizeof(union ixgbe_adv_rx_desc);
-	rx_ring->size = ALIGN(rx_ring->size, 4096);
+	rx_ring->dma_size = rx_ring->count * sizeof(union ixgbe_adv_rx_desc);
+	rx_ring->dma_size = ALIGN(rx_ring->dma_size, 4096);
 
-	rx_ring->desc = dma_alloc_coherent(rx_ring->dev, rx_ring->size,
+	rx_ring->desc = dma_alloc_coherent(ixgbevf_dma_dev_from_ring(rx_ring),
+					   rx_ring->dma_size,
 					   &rx_ring->dma, GFP_KERNEL);
 
-	if (!rx_ring->desc)
-		goto err;
+	if (!rx_ring->desc) {
+		dev_err(&adapter->pdev->dev,
+			"Unable to allocate memory for the Rx descriptor ring\n");
+		return -ENOMEM;
+	}
 
-	/* XDP RX-queue info */
-	if (xdp_rxq_info_reg(&rx_ring->xdp_rxq, adapter->netdev,
-			     rx_ring->queue_index, 0) < 0)
-		goto err;
-
-	rx_ring->xdp_prog = adapter->xdp_prog;
+	rcu_assign_pointer(rx_ring->xdp_prog, adapter->xdp_prog);
 
 	return 0;
-err:
-	vfree(rx_ring->rx_buffer_info);
-	rx_ring->rx_buffer_info = NULL;
-	dev_err(rx_ring->dev, "Unable to allocate memory for the Rx descriptor ring\n");
-	return -ENOMEM;
 }
 
 /**
@@ -3597,15 +3215,12 @@ err_setup_rx:
 void ixgbevf_free_rx_resources(struct ixgbevf_ring *rx_ring)
 {
 	ixgbevf_clean_rx_ring(rx_ring);
+	ixgbevf_rx_destroy_pp(rx_ring);
+	rcu_assign_pointer(rx_ring->xdp_prog, NULL);
 
-	rx_ring->xdp_prog = NULL;
-	xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
-	vfree(rx_ring->rx_buffer_info);
-	rx_ring->rx_buffer_info = NULL;
-
-	dma_free_coherent(rx_ring->dev, rx_ring->size, rx_ring->desc,
+	dma_free_coherent(ixgbevf_dma_dev_from_ring(rx_ring),
+			  rx_ring->dma_size, rx_ring->desc,
 			  rx_ring->dma);
-
 	rx_ring->desc = NULL;
 }
 
@@ -4292,6 +3907,18 @@ static int ixgbevf_set_mac(struct net_device *netdev, void *p)
 	return 0;
 }
 
+static bool ixgbevf_xdp_mtu_ok(const struct ixgbevf_adapter *adapter,
+			       const struct bpf_prog *prog, unsigned int mtu)
+{
+	u32 frame_size = mtu + LIBETH_RX_LL_LEN;
+	bool requires_mbuf;
+
+	requires_mbuf = frame_size > IXGBEVF_RX_PAGE_LEN(LIBETH_XDP_HEADROOM) ||
+			adapter->flags & IXGBEVF_FLAG_HSPLIT;
+
+	return prog->aux->xdp_has_frags || !requires_mbuf;
+}
+
 /**
  * ixgbevf_change_mtu - Change the Maximum Transfer Unit
  * @netdev: network interface device structure
@@ -4307,8 +3934,10 @@ static int ixgbevf_change_mtu(struct net_device *netdev, int new_mtu)
 	int ret;
 
 	/* prevent MTU being changed to a size unsupported by XDP */
-	if (adapter->xdp_prog) {
-		dev_warn(&adapter->pdev->dev, "MTU cannot be changed while XDP program is loaded\n");
+	if (adapter->xdp_prog &&
+	    !ixgbevf_xdp_mtu_ok(adapter, adapter->xdp_prog, new_mtu)) {
+		netdev_warn(netdev,
+			    "MTU value provided cannot be set while current XDP program is attached\n");
 		return -EPERM;
 	}
 
@@ -4468,24 +4097,24 @@ ixgbevf_features_check(struct sk_buff *skb, struct net_device *dev,
 	return features;
 }
 
-static int ixgbevf_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
+static int ixgbevf_xdp_setup(struct net_device *dev, struct bpf_prog *prog,
+			     struct netlink_ext_ack *extack)
 {
-	int i, frame_size = dev->mtu + ETH_HLEN + ETH_FCS_LEN + VLAN_HLEN;
 	struct ixgbevf_adapter *adapter = netdev_priv(dev);
 	struct bpf_prog *old_prog;
 
-	/* verify ixgbevf ring attributes are sufficient for XDP */
-	for (i = 0; i < adapter->num_rx_queues; i++) {
-		struct ixgbevf_ring *ring = adapter->rx_ring[i];
-
-		if (frame_size > ixgbevf_rx_bufsz(ring))
-			return -EINVAL;
+	if (prog && !ixgbevf_xdp_mtu_ok(adapter, prog, READ_ONCE(dev->mtu))) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Configured MTU or HW limitations require non-linear frames and XDP prog does not support frags");
+		return -EOPNOTSUPP;
 	}
 
 	old_prog = xchg(&adapter->xdp_prog, prog);
 
 	/* If transitioning XDP modes reconfigure rings */
 	if (!!prog != !!old_prog) {
+		xdp_features_clear_redirect_target(dev);
+
 		/* Hardware has to reinitialize queues and interrupts to
 		 * match packet buffer alignment. Unfortunately, the
 		 * hardware is not flexible enough to do this dynamically.
@@ -4499,9 +4128,14 @@ static int ixgbevf_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 		if (netif_running(dev))
 			ixgbevf_open(dev);
 	} else {
-		for (i = 0; i < adapter->num_rx_queues; i++)
-			xchg(&adapter->rx_ring[i]->xdp_prog, adapter->xdp_prog);
+		for (int i = 0; i < adapter->num_rx_queues; i++)
+			rcu_assign_pointer(adapter->rx_ring[i]->xdp_prog,
+					   adapter->xdp_prog);
+		synchronize_net();
 	}
+
+	if (prog)
+		xdp_features_set_redirect_target(dev, true);
 
 	if (old_prog)
 		bpf_prog_put(old_prog);
@@ -4513,7 +4147,10 @@ static int ixgbevf_xdp(struct net_device *dev, struct netdev_bpf *xdp)
 {
 	switch (xdp->command) {
 	case XDP_SETUP_PROG:
-		return ixgbevf_xdp_setup(dev, xdp->prog);
+		return ixgbevf_xdp_setup(dev, xdp->prog, xdp->extack);
+	case XDP_SETUP_XSK_POOL:
+		return ixgbevf_setup_xsk_pool(netdev_priv(dev), xdp->xsk.pool,
+					      xdp->xsk.queue_id);
 	default:
 		return -EINVAL;
 	}
@@ -4533,6 +4170,8 @@ static const struct net_device_ops ixgbevf_netdev_ops = {
 	.ndo_vlan_rx_kill_vid	= ixgbevf_vlan_rx_kill_vid,
 	.ndo_features_check	= ixgbevf_features_check,
 	.ndo_bpf		= ixgbevf_xdp,
+	.ndo_xdp_xmit		= ixgbevf_xdp_xmit,
+	.ndo_xsk_wakeup		= ixgbevf_xsk_wakeup,
 };
 
 static void ixgbevf_assign_netdev_ops(struct net_device *dev)
@@ -4665,7 +4304,7 @@ static int ixgbevf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			    NETIF_F_HW_VLAN_CTAG_TX;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
-	netdev->xdp_features = NETDEV_XDP_ACT_BASIC;
+	libeth_xdp_set_features_noredir(netdev, NULL, IXGBEVF_XSK_MAX_ZC_FRAGS);
 
 	/* MTU range: 68 - 1504 or 9710 */
 	netdev->min_mtu = ETH_MIN_MTU;
