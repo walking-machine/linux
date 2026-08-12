@@ -503,54 +503,19 @@ static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
 
 void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring)
 {
-	ixgbevf_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
+	libie_xg_clean_xdp_num(&xdp_ring->base, false, xdp_ring->pending,
+			       ring_is_xsk(xdp_ring));
 	libeth_xdpsq_put(&xdp_ring->xdpq_lock, xdp_ring->netdev);
-}
-
-static void ixgbevf_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
-				  const struct libeth_xdpsq *sq,
-				  u64 priv)
-{
-	union ixgbe_adv_tx_desc *tx_desc =
-		&((union ixgbe_adv_tx_desc *)sq->descs)[i];
-
-	u32 cmd_type = IXGBE_ADVTXD_DTYP_DATA |
-		       IXGBE_ADVTXD_DCMD_DEXT |
-		       IXGBE_ADVTXD_DCMD_IFCS |
-		       desc.len;
-
-	if (desc.flags & LIBETH_XDP_TX_LAST)
-		cmd_type |= IXGBE_TXD_CMD_EOP;
-
-	if (desc.flags & LIBETH_XDP_TX_FIRST) {
-		struct libeth_sqe *sqe = &sq->sqes[i];
-		struct skb_shared_info *sinfo;
-		u16 full_len = desc.len;
-
-		if (desc.flags & LIBETH_XDP_TX_MULTI) {
-			sinfo = sqe->type == LIBETH_SQE_XDP_TX ?
-				sqe->sinfo :
-				xdp_get_shared_info_from_frame(sqe->xdpf);
-			full_len += sinfo->xdp_frags_size;
-		}
-
-		tx_desc->read.olinfo_status =
-			cpu_to_le32((full_len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
-				    IXGBE_ADVTXD_CC);
-	}
-
-	tx_desc->read.buffer_addr = cpu_to_le64(desc.addr);
-	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
 }
 
 LIBETH_XDP_DEFINE_START();
 LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbevf_xdp_flush_tx, ixgbevf_prep_xdp_sq,
-			   ixgbevf_xdp_xmit_desc);
+			   libie_xg_xdp_xmit_desc);
 LIBETH_XDP_DEFINE_FLUSH_XMIT(static ixgbevf_xdp_flush_xmit, ixgbevf_prep_xdp_sq,
-			     ixgbevf_xdp_xmit_desc);
+			     libie_xg_xdp_xmit_desc);
 LIBETH_XDP_DEFINE_RUN_PROG(static ixgbevf_xdp_run_prog, ixgbevf_xdp_flush_tx);
 LIBETH_XDP_DEFINE_FINALIZE(static ixgbevf_xdp_finalize_xdp_napi,
-			   ixgbevf_xdp_flush_tx, ixgbevf_xdp_rs_and_bump);
+			   ixgbevf_xdp_flush_tx, libie_xg_xdp_rs_and_bump);
 LIBETH_XDP_DEFINE_END();
 
 static u32 ixgbevf_rx_hsplit_wa(const struct libeth_fqe *hdr,
@@ -713,7 +678,7 @@ static int ixgbevf_xdp_xmit(struct net_device *dev, int n,
 	return libeth_xdp_xmit_do_bulk(dev, n, frames, flags, adapter->xdp_ring,
 				       adapter->num_xdp_queues,
 				       ixgbevf_xdp_flush_xmit,
-				       ixgbevf_xdp_rs_and_bump);
+				       libie_xg_xdp_rs_and_bump);
 }
 
 /**
