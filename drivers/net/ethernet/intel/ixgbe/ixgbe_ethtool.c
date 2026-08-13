@@ -132,11 +132,9 @@ static const char ixgbe_gstrings_test[][ETH_GSTRING_LEN] = {
 #define IXGBE_TEST_LEN sizeof(ixgbe_gstrings_test) / ETH_GSTRING_LEN
 
 static const char ixgbe_priv_flags_strings[][ETH_GSTRING_LEN] = {
-#define IXGBE_PRIV_FLAGS_LEGACY_RX	BIT(0)
-	"legacy-rx",
-#define IXGBE_PRIV_FLAGS_VF_IPSEC_EN	BIT(1)
+#define IXGBE_PRIV_FLAGS_VF_IPSEC_EN	BIT(0)
 	"vf-ipsec",
-#define IXGBE_PRIV_FLAGS_AUTO_DISABLE_VF	BIT(2)
+#define IXGBE_PRIV_FLAGS_AUTO_DISABLE_VF	BIT(1)
 	"mdd-disable-vf",
 };
 
@@ -1951,7 +1949,6 @@ static int ixgbe_setup_desc_rings(struct ixgbe_adapter *adapter)
 	/* Setup Rx Descriptor ring and Rx buffers */
 	rx_ring->count = IXGBE_DEFAULT_RXD;
 	rx_ring->queue_index = 0;
-	rx_ring->dev = &adapter->pdev->dev;
 	rx_ring->netdev = adapter->netdev;
 	rx_ring->reg_idx = adapter->rx_ring[0]->reg_idx;
 
@@ -1962,6 +1959,10 @@ static int ixgbe_setup_desc_rings(struct ixgbe_adapter *adapter)
 	}
 
 	hw->mac.ops.disable_rx(hw);
+
+	clear_ring_rsc_enabled(rx_ring);
+	if (adapter->flags2 & IXGBE_FLAG2_RSC_ENABLED)
+		set_ring_rsc_enabled(rx_ring);
 
 	ixgbe_configure_rx_ring(adapter, rx_ring);
 
@@ -2058,14 +2059,16 @@ static void ixgbe_create_lbtest_frame(struct sk_buff *skb,
 	skb->data[frame_size + 12] = 0xAF;
 }
 
-static bool ixgbe_check_lbtest_frame(struct ixgbe_rx_buffer *rx_buffer,
+static bool ixgbe_check_lbtest_frame(const struct libeth_fqe *rx_buffer,
 				     unsigned int frame_size)
 {
+	u32 hr = netmem_get_pp(rx_buffer->netmem)->p.offset;
 	unsigned char *data;
 
 	frame_size >>= 1;
 
-	data = page_address(rx_buffer->page) + rx_buffer->page_offset;
+	data = page_address(__netmem_to_page(rx_buffer->netmem)) +
+	       rx_buffer->offset + hr;
 
 	return data[3] == 0xFF && data[frame_size + 10] == 0xBE &&
 		data[frame_size + 12] == 0xAF;
@@ -2113,16 +2116,13 @@ static u16 ixgbe_clean_test_rings(struct ixgbe_ring *rx_ring,
 	}
 
 	while (rx_desc->wb.upper.length) {
-		struct ixgbe_rx_buffer *rx_buffer;
+		struct libeth_fqe *rx_buffer;
 
 		/* check Rx buffer */
-		rx_buffer = &rx_ring->rx_buffer_info[rx_ntc];
+		rx_buffer = &rx_ring->rx_fqes[rx_ntc];
 
 		/* sync Rx buffer for CPU read */
-		dma_sync_single_for_cpu(rx_ring->dev,
-					rx_buffer->dma,
-					ixgbe_rx_bufsz(rx_ring),
-					DMA_FROM_DEVICE);
+		libeth_rx_sync_for_cpu(rx_buffer, rx_ring->rx_buf_len);
 
 		/* verify contents of skb */
 		if (ixgbe_check_lbtest_frame(rx_buffer, size))
@@ -2130,11 +2130,8 @@ static u16 ixgbe_clean_test_rings(struct ixgbe_ring *rx_ring,
 		else
 			break;
 
-		/* sync Rx buffer for device write */
-		dma_sync_single_for_device(rx_ring->dev,
-					   rx_buffer->dma,
-					   ixgbe_rx_bufsz(rx_ring),
-					   DMA_FROM_DEVICE);
+		/* recycle the page back to the pool */
+		libeth_rx_recycle_slow(rx_buffer->netmem);
 
 		/* increment Rx next to clean counter */
 		rx_ntc++;
@@ -3667,9 +3664,6 @@ static u32 ixgbe_get_priv_flags(struct net_device *netdev)
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 	u32 priv_flags = 0;
 
-	if (adapter->flags2 & IXGBE_FLAG2_RX_LEGACY)
-		priv_flags |= IXGBE_PRIV_FLAGS_LEGACY_RX;
-
 	if (adapter->flags2 & IXGBE_FLAG2_VF_IPSEC_ENABLED)
 		priv_flags |= IXGBE_PRIV_FLAGS_VF_IPSEC_EN;
 
@@ -3684,10 +3678,6 @@ static int ixgbe_set_priv_flags(struct net_device *netdev, u32 priv_flags)
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(netdev);
 	unsigned int flags2 = adapter->flags2;
 	unsigned int i;
-
-	flags2 &= ~IXGBE_FLAG2_RX_LEGACY;
-	if (priv_flags & IXGBE_PRIV_FLAGS_LEGACY_RX)
-		flags2 |= IXGBE_FLAG2_RX_LEGACY;
 
 	flags2 &= ~IXGBE_FLAG2_VF_IPSEC_ENABLED;
 	if (priv_flags & IXGBE_PRIV_FLAGS_VF_IPSEC_EN)
