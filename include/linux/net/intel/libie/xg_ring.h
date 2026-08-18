@@ -8,7 +8,7 @@
 #include <net/libeth/types.h>
 #include <net/xdp.h>
 
-#include <linux/net/intel/ixgbe_desc.h>
+#include <linux/net/intel/ixgbe_desc_common.h>
 
 struct libie_xg_queue_stats {
 	u64 packets;
