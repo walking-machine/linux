@@ -7,6 +7,7 @@
 #include <linux/types.h>
 #include <linux/mdio.h>
 #include <linux/netdevice.h>
+#include <linux/net/intel/ixgbe_desc_common.h>
 #include <linux/net/intel/libie/fwlog.h>
 #include "ixgbe_type_e610.h"
 
@@ -2358,13 +2359,8 @@ enum {
 
 #define IXGBE_TXD_POPTS_IXSM 0x01       /* Insert IP checksum */
 #define IXGBE_TXD_POPTS_TXSM 0x02       /* Insert TCP/UDP checksum */
-#define IXGBE_TXD_CMD_EOP    0x01000000 /* End of Packet */
-#define IXGBE_TXD_CMD_IFCS   0x02000000 /* Insert FCS (Ethernet CRC) */
 #define IXGBE_TXD_CMD_IC     0x04000000 /* Insert Checksum */
-#define IXGBE_TXD_CMD_RS     0x08000000 /* Report Status */
-#define IXGBE_TXD_CMD_DEXT   0x20000000 /* Descriptor extension (0 = legacy) */
 #define IXGBE_TXD_CMD_VLE    0x40000000 /* Add VLAN tag */
-#define IXGBE_TXD_STAT_DD    0x00000001 /* Descriptor Done */
 
 /* Multiple Transmit Queue Command Register */
 #define IXGBE_MTQC_RT_ENA       0x1 /* DCB Enable */
@@ -2884,51 +2880,6 @@ struct ixgbe_hic_phy_activity_resp {
 	__be32 data[FW_PHY_ACT_DATA_COUNT];
 };
 
-/* Transmit Descriptor - Advanced */
-union ixgbe_adv_tx_desc {
-	struct {
-		__le64 buffer_addr;      /* Address of descriptor's data buf */
-		__le32 cmd_type_len;
-		__le32 olinfo_status;
-	} read;
-	struct {
-		__le64 rsvd;       /* Reserved */
-		__le32 nxtseq_seed;
-		__le32 status;
-	} wb;
-};
-
-/* Receive Descriptor - Advanced */
-union ixgbe_adv_rx_desc {
-	struct {
-		__le64 pkt_addr; /* Packet buffer address */
-		__le64 hdr_addr; /* Header buffer address */
-	} read;
-	struct {
-		struct {
-			union {
-				__le32 data;
-				struct {
-					__le16 pkt_info; /* RSS, Pkt type */
-					__le16 hdr_info; /* Splithdr, hdrlen */
-				} hs_rss;
-			} lo_dword;
-			union {
-				__le32 rss; /* RSS Hash */
-				struct {
-					__le16 ip_id; /* IP id */
-					__le16 csum; /* Packet Checksum */
-				} csum_ip;
-			} hi_dword;
-		} lower;
-		struct {
-			__le32 status_error; /* ext status/error */
-			__le16 length; /* Packet length */
-			__le16 vlan; /* VLAN tag */
-		} upper;
-	} wb;  /* writeback */
-};
-
 /* Context descriptors */
 struct ixgbe_adv_tx_context_desc {
 	__le32 vlan_macip_lens;
@@ -2952,19 +2903,15 @@ enum {
 #define IXGBE_ADVTXD_IPSEC_ESP_LEN_MASK    0x000001FF /* IPSec ESP length */
 #define IXGBE_ADVTXD_DTYP_MASK  0x00F00000 /* DTYP mask */
 #define IXGBE_ADVTXD_DTYP_CTXT	0x2 /* Advanced Context Desc */
-#define IXGBE_ADVTXD_DTYP_DATA  0x00300000 /* Advanced Data Descriptor */
 #define IXGBE_ADVTXD_DCMD_EOP   IXGBE_TXD_CMD_EOP  /* End of Packet */
-#define IXGBE_ADVTXD_DCMD_IFCS  IXGBE_TXD_CMD_IFCS /* Insert FCS */
 #define IXGBE_ADVTXD_DCMD_RS    IXGBE_TXD_CMD_RS   /* Report Status */
 #define IXGBE_ADVTXD_DCMD_DDTYP_ISCSI 0x10000000    /* DDP hdr type or iSCSI */
-#define IXGBE_ADVTXD_DCMD_DEXT  IXGBE_TXD_CMD_DEXT /* Desc ext (1=Adv) */
 #define IXGBE_ADVTXD_DCMD_VLE   IXGBE_TXD_CMD_VLE  /* VLAN pkt enable */
 #define IXGBE_ADVTXD_DCMD_TSE   0x80000000 /* TCP Seg enable */
 #define IXGBE_ADVTXD_STAT_DD    IXGBE_TXD_STAT_DD  /* Descriptor Done */
 #define IXGBE_ADVTXD_STAT_SN_CRC      0x00000002 /* NXTSEQ/SEED pres in WB */
 #define IXGBE_ADVTXD_STAT_RSV   0x0000000C /* STA Reserved */
 #define IXGBE_ADVTXD_IDX_SHIFT  4 /* Adv desc Index shift */
-#define IXGBE_ADVTXD_CC         0x00000080 /* Check Context */
 #define IXGBE_ADVTXD_POPTS_SHIFT      8  /* Adv desc POPTS shift */
 #define IXGBE_ADVTXD_POPTS_IXSM (IXGBE_TXD_POPTS_IXSM << \
 				 IXGBE_ADVTXD_POPTS_SHIFT)
@@ -2976,7 +2923,6 @@ enum {
 #define IXGBE_ADVTXD_POPTS_ISCO_LAST 0x00001000 /* Last TSO of iSCSI PDU */
 #define IXGBE_ADVTXD_POPTS_ISCO_FULL 0x00001800 /* 1st&Last TSO-full iSCSI PDU */
 #define IXGBE_ADVTXD_POPTS_RSV       0x00002000 /* POPTS Reserved */
-#define IXGBE_ADVTXD_PAYLEN_SHIFT    14 /* Adv desc PAYLEN shift */
 #define IXGBE_ADVTXD_MACLEN_SHIFT    9  /* Adv ctxt desc mac len shift */
 #define IXGBE_ADVTXD_VLAN_SHIFT      16  /* Adv ctxt vlan tag shift */
 #define IXGBE_ADVTXD_TUCMD_IPV4      0x00000400  /* IP Packet Type: 1=IPv4 */
