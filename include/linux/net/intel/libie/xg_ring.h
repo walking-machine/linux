@@ -4,32 +4,9 @@
 #ifndef __LIBIE_XG_RING_H
 #define __LIBIE_XG_RING_H
 
-#include <linux/u64_stats_sync.h>
+#include <linux/net/intel/ixgbe_desc_common.h>
 #include <net/libeth/types.h>
 #include <net/xdp.h>
-
-#include <linux/net/intel/ixgbe_desc_common.h>
-
-struct libie_xg_queue_stats {
-	u64 packets;
-	u64 bytes;
-};
-
-struct libie_xg_tx_queue_stats {
-	u64 restart_queue;
-	u64 tx_busy;
-	u64 tx_done_old;
-};
-
-struct libie_xg_rx_queue_stats {
-	/* u64 rsc_count; <- was in ixgbe
-	u64 rsc_flush; */
-	u64 non_eop_descs;
-	u64 alloc_rx_page;
-	u64 alloc_rx_page_failed;
-	u64 alloc_rx_buff_failed;
-	u64 csum_err;
-};
 
 struct libie_xg_tx_buffer {
 	union ixgbe_adv_tx_desc *next_to_watch;
@@ -76,7 +53,5 @@ struct libie_xg_ring {
 	(&(((union ixgbe_adv_rx_desc *)((R)->desc))[i]))
 #define LIBIE_XG_TX_DESC(R, i)	\
 	(&(((union ixgbe_adv_tx_desc *)((R)->desc))[i]))
-#define LIBIE_XG_TX_CTXTDESC(R, i)	\
-	(&(((struct ixgbe_adv_tx_context_desc *)((R)->desc))[i]))
 
-#endif
+#endif /* __LIBIE_XG_RING_H */
