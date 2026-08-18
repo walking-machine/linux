@@ -451,7 +451,7 @@ static const struct xfrmdev_ops ixgbevf_xfrmdev_ops = {
  * @itd: ipsec Tx data for later use in building context descriptor
  **/
 int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring,
-		     struct ixgbevf_tx_buffer *first,
+		     struct libie_xg_tx_buffer *first,
 		     struct ixgbevf_ipsec_tx_data *itd)
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(tx_ring->netdev);
