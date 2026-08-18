@@ -32,6 +32,7 @@
 #endif
 #include "ixgbe_ipsec.h"
 
+#include <linux/net/intel/libie/xg_ring.h>
 #include <net/xdp.h>
 #include <net/libeth/rx.h>
 #include <net/libeth/types.h>
@@ -196,23 +197,6 @@ struct vf_macvlans {
 #define TXD_USE_COUNT(S) DIV_ROUND_UP((S), IXGBE_MAX_DATA_PER_TXD)
 #define DESC_NEEDED (MAX_SKB_FRAGS + 4)
 
-/* wrapper around a pointer to a socket buffer,
- * so a DMA handle can be stored along with the buffer */
-struct ixgbe_tx_buffer {
-	union ixgbe_adv_tx_desc *next_to_watch;
-	unsigned long time_stamp;
-	union {
-		struct sk_buff *skb;
-		struct xdp_frame *xdpf;
-	};
-	unsigned int bytecount;
-	unsigned short gso_segs;
-	__be16 protocol;
-	DEFINE_DMA_UNMAP_ADDR(dma);
-	DEFINE_DMA_UNMAP_LEN(len);
-	u32 tx_flags;
-};
-
 struct ixgbe_xsk_rx_buffer {
 	bool discard;
 	struct xdp_buff *xdp;
@@ -280,27 +264,18 @@ struct ixgbe_fwd_adapter {
 #define clear_ring_xdp(ring) \
 	clear_bit(__IXGBE_TX_XDP_RING, &(ring)->state)
 struct ixgbe_ring {
+	union {
+		struct libie_xg_ring base;
+		struct libie_xg_ring;
+	};
 	struct ixgbe_ring *next;	/* pointer to next ring in q_vector */
 	struct ixgbe_q_vector *q_vector; /* backpointer to host q_vector */
 	struct net_device *netdev;	/* netdev ring belongs to */
 	struct bpf_prog __rcu *xdp_prog;
-	union {
-		struct page_pool *pp;	/* Rx ring */
-		struct device *dev;	/* Tx ring */
-	};
-	void *desc;			/* descriptor ring memory */
-	union {
-		struct libeth_fqe *rx_fqes;
-		struct ixgbe_xsk_rx_buffer *rx_xsk_buffer_info;
-		struct ixgbe_tx_buffer *tx_buffer_info;
-	};
 	unsigned long state;
-	u8 __iomem *tail;
 	dma_addr_t dma;			/* phys. address of descriptor ring */
 	unsigned int size;		/* length in bytes */
 	u32 truesize;
-
-	u16 count;			/* amount of descriptors */
 
 	u8 queue_index; /* needed for multiqueue queue management */
 	u8 reg_idx;			/* holds the special value that gets
@@ -308,8 +283,6 @@ struct ixgbe_ring {
 					 * associated with this ring, which is
 					 * different for DCB and RSS modes
 					 */
-	u16 next_to_use;
-	u16 next_to_clean;
 
 	unsigned long last_rx_timestamp;
 
@@ -327,10 +300,10 @@ struct ixgbe_ring {
 	};
 	struct xdp_rxq_info xdp_rxq;
 	spinlock_t tx_lock;	/* used in XDP mode */
-	struct xsk_buff_pool *xsk_pool;
 	u16 ring_idx;		/* {rx,tx,xdp}_ring back reference idx */
 	u32 rx_buf_len;
 	struct libeth_xdp_buff_stash xdp_stash;
+	struct ixgbe_xsk_rx_buffer *rx_xsk_buffer_info;
 } ____cacheline_internodealigned_in_smp;
 
 enum ixgbe_ring_f_enum {
@@ -923,7 +896,7 @@ int ixgbe_sysfs_init(struct ixgbe_adapter *adapter);
 #endif /* CONFIG_IXGBE_HWMON */
 #ifdef IXGBE_FCOE
 void ixgbe_configure_fcoe(struct ixgbe_adapter *adapter);
-int ixgbe_fso(struct ixgbe_ring *tx_ring, struct ixgbe_tx_buffer *first,
+int ixgbe_fso(struct ixgbe_ring *tx_ring, struct libie_xg_tx_buffer *first,
 	      u8 *hdr_len);
 int ixgbe_fcoe_ddp(struct ixgbe_adapter *adapter,
 		   union ixgbe_adv_rx_desc *rx_desc, struct sk_buff *skb);
@@ -1012,7 +985,7 @@ void ixgbe_ipsec_restore(struct ixgbe_adapter *adapter);
 void ixgbe_ipsec_rx(struct ixgbe_ring *rx_ring,
 		    union ixgbe_adv_rx_desc *rx_desc,
 		    struct sk_buff *skb);
-int ixgbe_ipsec_tx(struct ixgbe_ring *tx_ring, struct ixgbe_tx_buffer *first,
+int ixgbe_ipsec_tx(struct ixgbe_ring *tx_ring, struct libie_xg_tx_buffer *first,
 		   struct ixgbe_ipsec_tx_data *itd);
 void ixgbe_ipsec_vf_clear(struct ixgbe_adapter *adapter, u32 vf);
 int ixgbe_ipsec_vf_add_sa(struct ixgbe_adapter *adapter, u32 *mbuf, u32 vf);
@@ -1025,7 +998,7 @@ static inline void ixgbe_ipsec_rx(struct ixgbe_ring *rx_ring,
 				  union ixgbe_adv_rx_desc *rx_desc,
 				  struct sk_buff *skb) { }
 static inline int ixgbe_ipsec_tx(struct ixgbe_ring *tx_ring,
-				 struct ixgbe_tx_buffer *first,
+				 struct libie_xg_tx_buffer *first,
 				 struct ixgbe_ipsec_tx_data *itd) { return 0; }
 static inline void ixgbe_ipsec_vf_clear(struct ixgbe_adapter *adapter,
 					u32 vf) { }

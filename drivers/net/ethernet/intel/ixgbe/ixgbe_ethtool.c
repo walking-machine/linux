@@ -2087,8 +2087,8 @@ static u16 ixgbe_clean_test_rings(struct ixgbe_ring *rx_ring,
 	rx_desc = IXGBE_RX_DESC(rx_ring, rx_ntc);
 
 	while (tx_ntc != tx_ring->next_to_use) {
+		struct libie_xg_tx_buffer *tx_buffer;
 		union ixgbe_adv_tx_desc *tx_desc;
-		struct ixgbe_tx_buffer *tx_buffer;
 
 		tx_desc = IXGBE_TX_DESC(tx_ring, tx_ntc);
 

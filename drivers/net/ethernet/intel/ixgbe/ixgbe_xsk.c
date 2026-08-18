@@ -393,7 +393,7 @@ static bool ixgbe_xmit_zc(struct ixgbe_ring *xdp_ring, unsigned int budget)
 {
 	struct xsk_buff_pool *pool = xdp_ring->xsk_pool;
 	union ixgbe_adv_tx_desc *tx_desc = NULL;
-	struct ixgbe_tx_buffer *tx_bi;
+	struct libie_xg_tx_buffer *tx_bi;
 	bool work_done = true;
 	struct xdp_desc desc;
 	dma_addr_t dma;
@@ -447,7 +447,7 @@ static bool ixgbe_xmit_zc(struct ixgbe_ring *xdp_ring, unsigned int budget)
 }
 
 static void ixgbe_clean_xdp_tx_buffer(struct ixgbe_ring *tx_ring,
-				      struct ixgbe_tx_buffer *tx_bi)
+				      struct libie_xg_tx_buffer *tx_bi)
 {
 	xdp_return_frame(tx_bi->xdpf);
 	dma_unmap_single(tx_ring->dev,
@@ -463,7 +463,7 @@ bool ixgbe_clean_xdp_tx_irq(struct ixgbe_q_vector *q_vector,
 	unsigned int total_packets = 0, total_bytes = 0;
 	struct xsk_buff_pool *pool = tx_ring->xsk_pool;
 	union ixgbe_adv_tx_desc *tx_desc;
-	struct ixgbe_tx_buffer *tx_bi;
+	struct libie_xg_tx_buffer *tx_bi;
 	u32 xsk_frames = 0;
 
 	tx_bi = &tx_ring->tx_buffer_info[ntc];
@@ -544,7 +544,7 @@ void ixgbe_xsk_clean_tx_ring(struct ixgbe_ring *tx_ring)
 {
 	u16 ntc = tx_ring->next_to_clean, ntu = tx_ring->next_to_use;
 	struct xsk_buff_pool *pool = tx_ring->xsk_pool;
-	struct ixgbe_tx_buffer *tx_bi;
+	struct libie_xg_tx_buffer *tx_bi;
 	u32 xsk_frames = 0;
 
 	while (ntc != ntu) {

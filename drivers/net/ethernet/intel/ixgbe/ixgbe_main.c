@@ -569,7 +569,7 @@ static void ixgbe_regdump(struct ixgbe_hw *hw, struct ixgbe_reg_info *reginfo)
 
 static void ixgbe_print_buffer(struct ixgbe_ring *ring, int n)
 {
-	struct ixgbe_tx_buffer *tx_buffer;
+	struct libie_xg_tx_buffer *tx_buffer;
 
 	tx_buffer = &ring->tx_buffer_info[ring->next_to_clean];
 	pr_info(" %5d %5X %5X %016llX %08X %p %016llX\n",
@@ -590,7 +590,7 @@ static void ixgbe_dump(struct ixgbe_adapter *adapter)
 	struct ixgbe_reg_info *reginfo;
 	int n = 0;
 	struct ixgbe_ring *ring;
-	struct ixgbe_tx_buffer *tx_buffer;
+	struct libie_xg_tx_buffer *tx_buffer;
 	union ixgbe_adv_tx_desc *tx_desc;
 	struct my_u0 { u64 a; u64 b; } *u0;
 	struct ixgbe_ring *rx_ring;
@@ -1348,7 +1348,7 @@ static bool ixgbe_clean_tx_irq(struct ixgbe_q_vector *q_vector,
 				   struct ixgbe_ring *tx_ring, int napi_budget)
 {
 	struct ixgbe_adapter *adapter = q_vector->adapter;
-	struct ixgbe_tx_buffer *tx_buffer;
+	struct libie_xg_tx_buffer *tx_buffer;
 	union ixgbe_adv_tx_desc *tx_desc;
 	unsigned int total_bytes = 0, total_packets = 0, total_ipsec = 0;
 	unsigned int budget = q_vector->tx.work_limit;
@@ -3493,7 +3493,7 @@ void ixgbe_configure_tx_ring(struct ixgbe_adapter *adapter,
 
 	/* reinitialize tx_buffer_info */
 	memset(ring->tx_buffer_info, 0,
-		   sizeof(struct ixgbe_tx_buffer) * ring->count);
+		   sizeof(struct libie_xg_tx_buffer) * ring->count);
 
 	/* enable queue */
 	IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(reg_idx), txdctl);
@@ -6002,7 +6002,7 @@ void ixgbe_reset(struct ixgbe_adapter *adapter)
 static void ixgbe_clean_tx_ring(struct ixgbe_ring *tx_ring)
 {
 	u16 i = tx_ring->next_to_clean;
-	struct ixgbe_tx_buffer *tx_buffer = &tx_ring->tx_buffer_info[i];
+	struct libie_xg_tx_buffer *tx_buffer = &tx_ring->tx_buffer_info[i];
 
 	if (tx_ring->xsk_pool) {
 		ixgbe_xsk_clean_tx_ring(tx_ring);
@@ -6488,7 +6488,7 @@ int ixgbe_setup_tx_resources(struct ixgbe_ring *tx_ring)
 	int ring_node = NUMA_NO_NODE;
 	int size;
 
-	size = sizeof(struct ixgbe_tx_buffer) * tx_ring->count;
+	size = sizeof(struct libie_xg_tx_buffer) * tx_ring->count;
 
 	if (tx_ring->q_vector)
 		ring_node = tx_ring->q_vector->numa_node;
@@ -8151,7 +8151,7 @@ static void ixgbe_service_task(struct work_struct *work)
 }
 
 static int ixgbe_tso(struct ixgbe_ring *tx_ring,
-			 struct ixgbe_tx_buffer *first,
+			 struct libie_xg_tx_buffer *first,
 			 u8 *hdr_len,
 			 struct ixgbe_ipsec_tx_data *itd)
 {
@@ -8257,7 +8257,7 @@ static int ixgbe_tso(struct ixgbe_ring *tx_ring,
 }
 
 static void ixgbe_tx_csum(struct ixgbe_ring *tx_ring,
-			  struct ixgbe_tx_buffer *first,
+			  struct libie_xg_tx_buffer *first,
 			  struct ixgbe_ipsec_tx_data *itd)
 {
 	struct sk_buff *skb = first->skb;
@@ -8386,11 +8386,11 @@ static inline int ixgbe_maybe_stop_tx(struct ixgbe_ring *tx_ring, u16 size)
 }
 
 static int ixgbe_tx_map(struct ixgbe_ring *tx_ring,
-			struct ixgbe_tx_buffer *first,
+			struct libie_xg_tx_buffer *first,
 			const u8 hdr_len)
 {
 	struct sk_buff *skb = first->skb;
-	struct ixgbe_tx_buffer *tx_buffer;
+	struct libie_xg_tx_buffer *tx_buffer;
 	union ixgbe_adv_tx_desc *tx_desc;
 	skb_frag_t *frag;
 	dma_addr_t dma;
@@ -8540,7 +8540,7 @@ dma_error:
 }
 
 static void ixgbe_atr(struct ixgbe_ring *ring,
-			  struct ixgbe_tx_buffer *first)
+			  struct libie_xg_tx_buffer *first)
 {
 	struct ixgbe_q_vector *q_vector = ring->q_vector;
 	union ixgbe_atr_hash_dword input = { .dword = 0 };
@@ -8739,8 +8739,8 @@ int ixgbe_xmit_xdp_ring(struct ixgbe_ring *ring,
 	struct skb_shared_info *sinfo = xdp_get_shared_info_from_frame(xdpf);
 	u8 nr_frags = unlikely(xdp_frame_has_frags(xdpf)) ? sinfo->nr_frags : 0;
 	u16 i = 0, index = ring->next_to_use;
-	struct ixgbe_tx_buffer *tx_head = &ring->tx_buffer_info[index];
-	struct ixgbe_tx_buffer *tx_buff = tx_head;
+	struct libie_xg_tx_buffer *tx_head = &ring->tx_buffer_info[index];
+	struct libie_xg_tx_buffer *tx_buff = tx_head;
 	union ixgbe_adv_tx_desc *tx_desc = IXGBE_TX_DESC(ring, index);
 	u32 cmd_type, len = xdpf->len;
 	void *data = xdpf->data;
@@ -8819,7 +8819,7 @@ netdev_tx_t ixgbe_xmit_frame_ring(struct sk_buff *skb,
 			  struct ixgbe_adapter *adapter,
 			  struct ixgbe_ring *tx_ring)
 {
-	struct ixgbe_tx_buffer *first;
+	struct libie_xg_tx_buffer *first;
 	int tso;
 	u32 tx_flags = 0;
 	unsigned short f;
