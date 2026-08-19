@@ -1422,6 +1422,7 @@ void ixgbevf_rx_destroy_pp(struct ixgbevf_ring *rx_ring)
 	rx_ring->hdr_pp = NULL;
 }
 
+// TODO : rename to create_fq
 static int ixgbevf_rx_create_pp(struct ixgbevf_ring *rx_ring)
 {
 	u32 adapter_flags = rx_ring->q_vector->adapter->flags;
