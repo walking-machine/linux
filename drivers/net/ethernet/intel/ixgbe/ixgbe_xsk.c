@@ -522,7 +522,7 @@ int ixgbe_xsk_wakeup(struct net_device *dev, u32 qid, u32 flags)
 
 	ring = adapter->rx_ring[qid];
 
-	if (unlikely(!ring->xsk_pool))
+	if (unlikely(!ring_is_xsk(ring)))
 		return -EINVAL;
 
 	if (!napi_if_scheduled_mark_missed(&ring->q_vector->napi)) {

@@ -3168,7 +3168,7 @@ int ixgbe_poll(struct napi_struct *napi, int budget)
 #endif
 
 	ixgbe_for_each_ring(ring, q_vector->tx) {
-		bool wd = ring->xsk_pool ?
+		bool wd = ring_is_xsk(ring) ?
 			  ixgbe_clean_xdp_tx_irq(q_vector, ring, budget) :
 			  ixgbe_clean_tx_irq(q_vector, ring, budget);
 
@@ -3188,7 +3188,7 @@ int ixgbe_poll(struct napi_struct *napi, int budget)
 		per_ring_budget = budget;
 
 	ixgbe_for_each_ring(ring, q_vector->rx) {
-		int cleaned = ring->xsk_pool ?
+		int cleaned = ring_is_xsk(ring) ?
 				  ixgbe_clean_rx_irq_zc(q_vector, ring,
 							per_ring_budget) :
 				  ixgbe_clean_rx_irq(q_vector, ring,
@@ -3482,15 +3482,18 @@ static void ixgbe_configure_msi_and_legacy(struct ixgbe_adapter *adapter)
 void ixgbe_configure_tx_ring(struct ixgbe_adapter *adapter,
 				 struct ixgbe_ring *ring)
 {
+	struct xsk_buff_pool *xsk_pool = NULL;
 	struct ixgbe_hw *hw = &adapter->hw;
-	u64 tdba = ring->dma;
-	int wait_loop = 10;
 	u32 txdctl = IXGBE_TXDCTL_ENABLE;
 	u8 reg_idx = ring->reg_idx;
+	u64 tdba = ring->dma;
+	int wait_loop = 10;
 
-	ring->xsk_pool = NULL;
-	if (ring_is_xdp(ring))
-		ring->xsk_pool = ixgbe_xsk_pool(adapter, ring);
+	xsk_pool = ixgbe_xsk_pool(adapter, ring);
+	if (xsk_pool && ring_is_xdp(ring)) {
+		ring->xsk_pool = xsk_pool;
+		set_ring_xsk(ring);
+	}
 
 	/* disable queue to avoid issues while updating state */
 	IXGBE_WRITE_REG(hw, IXGBE_TXDCTL(reg_idx), 0);
@@ -3736,7 +3739,7 @@ static void ixgbe_configure_srrctl(struct ixgbe_adapter *adapter,
 	/* configure header buffer length, needed for RSC */
 	srrctl = IXGBE_RX_HDR_SIZE << IXGBE_SRRCTL_BSIZEHDRSIZE_SHIFT;
 
-	if (ring->xsk_pool)
+	if (ring_is_xsk(ring))
 		srrctl |= DIV_ROUND_UP(xsk_pool_get_rx_frame_size(ring->xsk_pool),
 					   IXGBE_SRRCTL_BSIZEPKT_STEP);
 	else
@@ -4124,7 +4127,7 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 				IXGBE_RXDCTL_RLPML_EN);
 	}
 #endif
-	if (ring->xsk_pool && hw->mac.type != ixgbe_mac_82599EB) {
+	if (ring_is_xsk(ring) && hw->mac.type != ixgbe_mac_82599EB) {
 		u32 pkt_len =
 			READ_ONCE(adapter->netdev->mtu) + LIBETH_RX_LL_LEN;
 
@@ -4143,7 +4146,7 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 	IXGBE_WRITE_REG(hw, IXGBE_RXDCTL(reg_idx), rxdctl);
 
 	ixgbe_rx_desc_queue_enable(adapter, ring);
-	if (ring->xsk_pool)
+	if (ring_is_xsk(ring))
 		ixgbe_alloc_rx_buffers_zc(ring, ixgbe_desc_unused(ring));
 	else
 		ixgbe_alloc_rx_buffers(ring, ixgbe_desc_unused(ring));
@@ -5260,7 +5263,7 @@ static void ixgbe_fdir_filter_restore(struct ixgbe_adapter *adapter)
  **/
 static void ixgbe_clean_rx_ring(struct ixgbe_ring *rx_ring)
 {
-	if (rx_ring->xsk_pool) {
+	if (ring_is_xsk(rx_ring)) {
 		ixgbe_xsk_clean_rx_ring(rx_ring);
 		goto skip_free;
 	}
@@ -6069,7 +6072,7 @@ static void ixgbe_clean_tx_ring(struct ixgbe_ring *tx_ring)
 	u16 i = tx_ring->next_to_clean;
 	struct libie_xg_tx_buffer *tx_buffer = &tx_ring->tx_buffer_info[i];
 
-	if (tx_ring->xsk_pool) {
+	if (ring_is_xsk(tx_ring)) {
 		ixgbe_xsk_clean_tx_ring(tx_ring);
 		goto out;
 	}
@@ -10534,7 +10537,7 @@ static int ixgbe_xdp_setup(struct net_device *dev, struct bpf_prog *prog,
 		num_queues = min_t(int, adapter->num_rx_queues,
 				   adapter->num_xdp_queues);
 		for (int i = 0; i < num_queues; i++)
-			if (adapter->xdp_ring[i]->xsk_pool)
+			if (ring_is_xsk(adapter->xdp_ring[i]))
 				(void)ixgbe_xsk_wakeup(adapter->netdev, i,
 							   XDP_WAKEUP_RX);
 		xdp_features_set_redirect_target(dev, true);
