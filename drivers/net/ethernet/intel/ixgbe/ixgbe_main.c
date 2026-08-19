@@ -31,7 +31,7 @@
 #include <linux/numa.h>
 #include <generated/utsrelease.h>
 #include <scsi/fc/fc_fcoe.h>
-#include <net/libeth/xdp.h>
+#include <net/libeth/xsk.h>
 #include <net/udp_tunnel.h>
 #include <net/pkt_cls.h>
 #include <net/tc_act/tc_gact.h>
@@ -6651,8 +6651,19 @@ static void ixgbe_rx_destroy_fq(struct ixgbe_ring *rx_ring)
 		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
 	}
 
-	if (ring_is_xsk(rx_ring))
-		return;
+	// TODO : previous code was not clearing xsk bit
+	if (test_and_clear_bit(__IXGBE_RXTX_XSK_RING, &rx_ring->state)) {
+		struct libeth_xskfq xskfq = {
+			.fqes = rx_ring->xsk_fqes,
+		};
+
+		libeth_xskfq_destroy(&xskfq);
+		rx_ring->xsk_fqes = NULL;
+		rx_ring->pending = xskfq.pending;
+		rx_ring->thresh = xskfq.thresh;
+		rx_ring->rx_buf_len = xskfq.buf_len;
+		rx_ring->xsk_pool = NULL;
+	}
 
 	if (!fq.pp)
 		return;
@@ -6692,8 +6703,20 @@ static int ixgbe_rx_create_fq(struct ixgbe_ring *rx_ring)
 
 	xsk_pool = ixgbe_xsk_pool(adapter, rx_ring);
 	if (xsk_pool) {
+		struct libeth_xskfq xskfq = {
+			.nid = numa_node_id(),
+			.count = rx_ring->count,
+			.pool = xsk_pool,
+		};
+
+		libeth_xskfq_create(&xskfq);
 		rx_ring->xsk_pool = xsk_pool;
+		rx_ring->xsk_fqes = xskfq.fqes;
+		rx_ring->pending = xskfq.count - 1;
+		rx_ring->thresh = xskfq.thresh;
+		rx_ring->rx_buf_len = xskfq.buf_len;
 		set_ring_xsk(rx_ring);
+
 		__xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
 				   rx_ring->queue_index,
 				   ixgbe_rx_napi_id(rx_ring), 0);

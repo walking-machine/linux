@@ -2,6 +2,7 @@
 /* Copyright(c) 2018 Intel Corporation. */
 
 #include <linux/bpf_trace.h>
+#include <linux/net/intel/libie/xg_xdp.h>
 #include <net/xdp_sock_drv.h>
 #include <net/xdp.h>
 
@@ -150,98 +151,24 @@ out_failure:
 
 bool ixgbe_alloc_rx_buffers_zc(struct ixgbe_ring *rx_ring, u16 count)
 {
-	union ixgbe_adv_rx_desc *rx_desc;
-	struct ixgbe_xsk_rx_buffer *bi;
-	u16 i = rx_ring->next_to_use;
-	dma_addr_t dma;
-	bool ok = true;
-
-	/* nothing to do */
-	if (!count)
-		return true;
-
-	rx_desc = IXGBE_RX_DESC(rx_ring, i);
-	bi = &rx_ring->rx_xsk_buffer_info[i];
-	i -= rx_ring->count;
-
-	do {
-		bi->xdp = xsk_buff_alloc(rx_ring->xsk_pool);
-		if (!bi->xdp) {
-			ok = false;
-			break;
-		}
-
-		dma = xsk_buff_xdp_get_dma(bi->xdp);
-
-		/* Refresh the desc even if buffer_addrs didn't change
-		 * because each write-back erases this info.
-		 */
-		rx_desc->read.pkt_addr = cpu_to_le64(dma);
-
-		rx_desc++;
-		bi++;
-		i++;
-		if (unlikely(!i)) {
-			rx_desc = IXGBE_RX_DESC(rx_ring, 0);
-			bi = rx_ring->rx_xsk_buffer_info;
-			i -= rx_ring->count;
-		}
-
-		/* clear the length for the next_to_use descriptor */
-		rx_desc->wb.upper.length = 0;
-
-		count--;
-	} while (count);
-
-	i += rx_ring->count;
-
-	if (rx_ring->next_to_use != i) {
-		rx_ring->next_to_use = i;
-
-		/* Force memory writes to complete before letting h/w
-		 * know there are new descriptors to fetch.  (Only
-		 * applicable for weak-ordered memory model archs,
-		 * such as IA-64).
-		 */
-		wmb();
-		writel(i, rx_ring->tail);
-	}
-
-	return ok;
+	return libie_xg_xsk_alloc_rx_bufs(&rx_ring->base, count);
 }
 
-static struct sk_buff *ixgbe_construct_skb_zc(struct ixgbe_ring *rx_ring,
-					      const struct xdp_buff *xdp)
-{
-	unsigned int totalsize = xdp->data_end - xdp->data_meta;
-	unsigned int metasize = xdp->data - xdp->data_meta;
-	struct sk_buff *skb;
-
-	net_prefetch(xdp->data_meta);
-
-	/* allocate a skb to store the frags */
-	skb = napi_alloc_skb(&rx_ring->q_vector->napi, totalsize);
-	if (unlikely(!skb))
-		return NULL;
-
-	memcpy(__skb_put(skb, totalsize), xdp->data_meta,
-	       ALIGN(totalsize, sizeof(long)));
-
-	if (metasize) {
-		skb_metadata_set(skb, metasize);
-		__skb_pull(skb, metasize);
-	}
-
-	return skb;
-}
-
-static void ixgbe_inc_ntc(struct ixgbe_ring *rx_ring)
+static bool ixgbe_xsk_is_non_eop(struct ixgbe_ring *rx_ring,
+				 union ixgbe_adv_rx_desc *rx_desc)
 {
 	u32 ntc = rx_ring->next_to_clean + 1;
 
 	ntc = (ntc < rx_ring->count) ? ntc : 0;
 	rx_ring->next_to_clean = ntc;
+	rx_ring->pending++;
+
 	prefetch(IXGBE_RX_DESC(rx_ring, ntc));
+
+	if (likely(ixgbe_test_staterr(rx_desc, IXGBE_RXD_STAT_EOP)))
+		return false;
+
+	return true;
 }
 
 int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
@@ -250,27 +177,19 @@ int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
 {
 	unsigned int total_rx_bytes = 0, total_rx_packets = 0;
 	struct ixgbe_adapter *adapter = q_vector->adapter;
-	u16 cleaned_count = ixgbe_desc_unused(rx_ring);
 	unsigned int xdp_res, xdp_xmit = 0;
+	struct libeth_xdp_buff *head_xdp;
 	bool failure = false;
 	struct sk_buff *skb;
 
 	while (likely(total_rx_packets < budget)) {
+		struct libeth_xdp_buff *rx_buffer;
 		union ixgbe_adv_rx_desc *rx_desc;
-		struct ixgbe_xsk_rx_buffer *bi;
 		unsigned int size;
-
-		/* return some buffers to hardware, one at a time is too slow */
-		if (cleaned_count >= IXGBE_RX_BUFFER_WRITE) {
-			failure = failure ||
-				  !ixgbe_alloc_rx_buffers_zc(rx_ring,
-							     cleaned_count);
-			cleaned_count = 0;
-		}
 
 		rx_desc = IXGBE_RX_DESC(rx_ring, rx_ring->next_to_clean);
 		size = le16_to_cpu(rx_desc->wb.upper.length);
-		if (!size)
+		if (unlikely(!size))
 			break;
 
 		/* This memory barrier is needed to keep us from reading
@@ -279,76 +198,54 @@ int ixgbe_clean_rx_irq_zc(struct ixgbe_q_vector *q_vector,
 		 */
 		dma_rmb();
 
-		bi = &rx_ring->rx_xsk_buffer_info[rx_ring->next_to_clean];
-
-		if (unlikely(!ixgbe_test_staterr(rx_desc,
-						 IXGBE_RXD_STAT_EOP))) {
-			struct ixgbe_xsk_rx_buffer *next_bi;
-
-			xsk_buff_free(bi->xdp);
-			bi->xdp = NULL;
-			ixgbe_inc_ntc(rx_ring);
-			next_bi =
-			       &rx_ring->rx_xsk_buffer_info[rx_ring->next_to_clean];
-			next_bi->discard = true;
+		rx_buffer = rx_ring->xsk_fqes[rx_ring->next_to_clean];
+		head_xdp = libeth_xsk_process_buff(head_xdp, rx_buffer, size);
+		if (ixgbe_xsk_is_non_eop(rx_ring, rx_desc) ||
+		    unlikely(!head_xdp))
 			continue;
-		}
 
-		if (unlikely(bi->discard)) {
-			xsk_buff_free(bi->xdp);
-			bi->xdp = NULL;
-			bi->discard = false;
-			ixgbe_inc_ntc(rx_ring);
-			continue;
-		}
+		total_rx_packets++;
+		total_rx_bytes += xdp_get_buff_len(&head_xdp->base);
 
-		bi->xdp->data_end = bi->xdp->data + size;
-		xsk_buff_dma_sync_for_cpu(bi->xdp);
-		xdp_res = ixgbe_run_xdp_zc(adapter, rx_ring, bi->xdp);
-
+		xdp_res = ixgbe_run_xdp_zc(adapter, rx_ring, &head_xdp->base);
 		if (likely(xdp_res & (IXGBE_XDP_TX | IXGBE_XDP_REDIR))) {
 			xdp_xmit |= xdp_res;
 		} else if (xdp_res == IXGBE_XDP_EXIT) {
 			failure = true;
 			break;
 		} else if (xdp_res == IXGBE_XDP_CONSUMED) {
-			xsk_buff_free(bi->xdp);
+			libeth_xdp_return_buff(head_xdp);
 		} else if (xdp_res == IXGBE_XDP_PASS) {
 			goto construct_skb;
 		}
 
-		bi->xdp = NULL;
-		total_rx_packets++;
-		total_rx_bytes += size;
+		head_xdp = NULL;
 
-		cleaned_count++;
-		ixgbe_inc_ntc(rx_ring);
 		continue;
 
 construct_skb:
 		/* XDP_PASS path */
-		skb = ixgbe_construct_skb_zc(rx_ring, bi->xdp);
-		if (!skb) {
+		skb = xdp_build_skb_from_zc(&head_xdp->base);
+		if (unlikely(!skb)) {
+			libeth_xdp_return_buff_slow(head_xdp);
+			head_xdp = NULL;
 			rx_ring->rx_stats.alloc_rx_buff_failed++;
 			break;
 		}
 
-		xsk_buff_free(bi->xdp);
-		bi->xdp = NULL;
-
-		cleaned_count++;
-		ixgbe_inc_ntc(rx_ring);
-
-		if (eth_skb_pad(skb))
-			continue;
-
-		total_rx_bytes += skb->len;
-		total_rx_packets++;
+		head_xdp = NULL;
 
 		skb->protocol = eth_type_trans(skb, rx_ring->netdev);
 		ixgbe_process_skb_fields(rx_ring, rx_desc, skb);
 		ixgbe_rx_skb(q_vector, skb);
 	}
+
+	if (rx_ring->pending >= rx_ring->thresh)
+		failure |= !ixgbe_alloc_rx_buffers_zc(rx_ring,
+						      rx_ring->pending);
+
+	/* place incomplete frames back on ring for completion */
+	rx_ring->xsk_xdp_head = head_xdp;
 
 	if (xdp_xmit & IXGBE_XDP_REDIR)
 		xdp_do_flush();
@@ -375,18 +272,7 @@ construct_skb:
 
 void ixgbe_xsk_clean_rx_ring(struct ixgbe_ring *rx_ring)
 {
-	struct ixgbe_xsk_rx_buffer *bi;
-	u16 i;
-
-	for (i = 0; i < rx_ring->count; i++) {
-		bi = &rx_ring->rx_xsk_buffer_info[i];
-
-		if (!bi->xdp)
-			continue;
-
-		xsk_buff_free(bi->xdp);
-		bi->xdp = NULL;
-	}
+	return libie_xg_rx_xsk_ring_free_buffs(&rx_ring->base);
 }
 
 static bool ixgbe_xmit_zc(struct ixgbe_ring *xdp_ring, unsigned int budget)

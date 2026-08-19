@@ -199,11 +199,6 @@ struct vf_macvlans {
 #define TXD_USE_COUNT(S) DIV_ROUND_UP((S), IXGBE_MAX_DATA_PER_TXD)
 #define DESC_NEEDED (MAX_SKB_FRAGS + 4)
 
-struct ixgbe_xsk_rx_buffer {
-	bool discard;
-	struct xdp_buff *xdp;
-};
-
 struct ixgbe_queue_stats {
 	u64 packets;
 	u64 bytes;
@@ -317,6 +312,7 @@ struct ixgbe_ring {
 	u32 rx_buf_len;
 	struct libeth_xdp_buff_stash xdp_stash;
 	struct ixgbe_xsk_rx_buffer *rx_xsk_buffer_info;
+	u32 thresh;
 } ____cacheline_internodealigned_in_smp;
 
 enum ixgbe_ring_f_enum {
