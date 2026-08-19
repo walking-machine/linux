@@ -4072,8 +4072,9 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 	u8 reg_idx = ring->reg_idx;
 
 	ixgbe_rx_destroy_pp(ring);
-	ring->xsk_pool = ixgbe_xsk_pool(adapter, ring);
-	if (ring->xsk_pool) {
+	if (ixgbe_xsk_pool(adapter, ring)) {
+		ring->xsk_pool = ixgbe_xsk_pool(adapter, ring);
+		set_ring_xsk(ring);
 		__xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
 				   ring->queue_index,
 				   ixgbe_rx_napi_id(ring), 0);
