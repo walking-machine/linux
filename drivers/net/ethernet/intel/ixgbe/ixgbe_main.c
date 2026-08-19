@@ -1751,7 +1751,7 @@ void ixgbe_alloc_rx_buffers(struct ixgbe_ring *rx_ring, u16 cleaned_count)
 	u16 ntu = rx_ring->next_to_use;
 
 	/* nothing to do */
-	if (unlikely(!cleaned_count))
+	if (unlikely(!cleaned_count) || unlikely(!fq.pp))
 		return;
 	rx_desc = IXGBE_RX_DESC(rx_ring, ntu);
 
@@ -4034,8 +4034,8 @@ static void ixgbe_configure_rscctl(struct ixgbe_adapter *adapter,
 	IXGBE_WRITE_REG(hw, IXGBE_RSCCTL(reg_idx), rscctrl);
 }
 
-static int ixgbe_rx_create_pp(struct ixgbe_ring *rx_ring);
-static void ixgbe_rx_destroy_pp(struct ixgbe_ring *rx_ring);
+static int ixgbe_rx_create_fq(struct ixgbe_ring *rx_ring);
+static void ixgbe_rx_destroy_fq(struct ixgbe_ring *rx_ring);
 static int ixgbe_rx_napi_id(struct ixgbe_ring *rx_ring);
 
 #define IXGBE_MAX_RX_DESC_POLL 10
@@ -4073,20 +4073,14 @@ void ixgbe_configure_rx_ring(struct ixgbe_adapter *adapter,
 	u64 rdba = ring->dma;
 	u32 rxdctl;
 	u8 reg_idx = ring->reg_idx;
+	int err;
 
-	ixgbe_rx_destroy_pp(ring);
-	if (ixgbe_xsk_pool(adapter, ring)) {
-		ring->xsk_pool = ixgbe_xsk_pool(adapter, ring);
-		set_ring_xsk(ring);
-		__xdp_rxq_info_reg(&ring->xdp_rxq, ring->netdev,
-				   ring->queue_index,
-				   ixgbe_rx_napi_id(ring), 0);
-		WARN_ON(xdp_rxq_info_reg_mem_model(&ring->xdp_rxq,
-						   MEM_TYPE_XSK_BUFF_POOL,
-						   NULL));
-		xsk_pool_set_rxq_info(ring->xsk_pool, &ring->xdp_rxq);
-	} else {
-		ixgbe_rx_create_pp(ring);
+	err = ixgbe_rx_create_fq(ring);
+	if (err) {
+		netdev_err(ring->netdev,
+			   "Failed to create Page Pool for buffer allocation: (%pe), RxQ %d is disabled, driver reload may be needed\n",
+			   ERR_PTR(err), ring->queue_index);
+		return;
 	}
 
 	/* disable queue to avoid use of these values while updating state */
@@ -6144,7 +6138,7 @@ static void ixgbe_clean_all_rx_rings(struct ixgbe_adapter *adapter)
 
 	for (i = 0; i < adapter->num_rx_queues; i++) {
 		ixgbe_clean_rx_ring(adapter->rx_ring[i]);
-		ixgbe_rx_destroy_pp(adapter->rx_ring[i]);
+		ixgbe_rx_destroy_fq(adapter->rx_ring[i]);
 	}
 }
 
@@ -6645,7 +6639,7 @@ static int ixgbe_rx_napi_id(struct ixgbe_ring *rx_ring)
 	return q_vector ? q_vector->napi.napi_id : 0;
 }
 
-static void ixgbe_rx_destroy_pp(struct ixgbe_ring *rx_ring)
+static void ixgbe_rx_destroy_fq(struct ixgbe_ring *rx_ring)
 {
 	struct libeth_fq fq = {
 		.pp	= rx_ring->pp,
@@ -6656,6 +6650,9 @@ static void ixgbe_rx_destroy_pp(struct ixgbe_ring *rx_ring)
 		xdp_rxq_info_detach_mem_model(&rx_ring->xdp_rxq);
 		xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
 	}
+
+	if (ring_is_xsk(rx_ring))
+		return;
 
 	if (!fq.pp)
 		return;
@@ -6677,9 +6674,10 @@ static void ixgbe_rx_destroy_pp(struct ixgbe_ring *rx_ring)
 	rx_ring->hdr_pp = NULL;
 }
 
-static int ixgbe_rx_create_pp(struct ixgbe_ring *rx_ring)
+static int ixgbe_rx_create_fq(struct ixgbe_ring *rx_ring)
 {
 	struct ixgbe_adapter *adapter = netdev_priv(rx_ring->netdev);
+	struct xsk_buff_pool *xsk_pool;
 	struct libeth_fq fq = {
 		.count		= rx_ring->count,
 		.nid		= NUMA_NO_NODE,
@@ -6691,6 +6689,24 @@ static int ixgbe_rx_create_pp(struct ixgbe_ring *rx_ring)
 	};
 	u32 frame_size;
 	int ret;
+
+	xsk_pool = ixgbe_xsk_pool(adapter, rx_ring);
+	if (xsk_pool) {
+		rx_ring->xsk_pool = xsk_pool;
+		set_ring_xsk(rx_ring);
+		__xdp_rxq_info_reg(&rx_ring->xdp_rxq, rx_ring->netdev,
+				   rx_ring->queue_index,
+				   ixgbe_rx_napi_id(rx_ring), 0);
+		ret = xdp_rxq_info_reg_mem_model(&rx_ring->xdp_rxq,
+						 MEM_TYPE_XSK_BUFF_POOL,
+						 NULL);
+		if (ret)
+			return ret;
+
+		xsk_pool_set_rxq_info(rx_ring->xsk_pool, &rx_ring->xdp_rxq);
+
+		return 0;
+	}
 
 	/* Some HW requires DMA write sizes to be aligned to 1K,
 	 * which warrants fake header split usage, but this is
@@ -6741,7 +6757,7 @@ static int ixgbe_rx_create_pp(struct ixgbe_ring *rx_ring)
 	return 0;
 
 err:
-	ixgbe_rx_destroy_pp(rx_ring);
+	ixgbe_rx_destroy_fq(rx_ring);
 	return ret;
 }
 
@@ -6879,7 +6895,7 @@ static void ixgbe_free_all_tx_resources(struct ixgbe_adapter *adapter)
 void ixgbe_free_rx_resources(struct ixgbe_ring *rx_ring)
 {
 	ixgbe_clean_rx_ring(rx_ring);
-	ixgbe_rx_destroy_pp(rx_ring);
+	ixgbe_rx_destroy_fq(rx_ring);
 
 	rx_ring->xdp_prog = NULL;
 
@@ -10837,6 +10853,7 @@ void ixgbe_txrx_ring_disable(struct ixgbe_adapter *adapter, int ring)
 	if (xdp_ring)
 		ixgbe_clean_tx_ring(xdp_ring);
 	ixgbe_clean_rx_ring(rx_ring);
+	ixgbe_rx_destroy_fq(rx_ring);
 
 	ixgbe_reset_txr_stats(tx_ring);
 	if (xdp_ring)
