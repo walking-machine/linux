@@ -237,7 +237,7 @@ enum ixgbe_ring_state_t {
 	__IXGBE_HANG_CHECK_ARMED,
 	__IXGBE_TX_XDP_RING,
 	__IXGBE_TX_DISABLED,
-	__IXGBEVF_RXTX_XSK_RING,
+	__IXGBE_RXTX_XSK_RING,
 };
 
 struct ixgbe_fwd_adapter {
@@ -267,11 +267,11 @@ struct ixgbe_fwd_adapter {
 #define clear_ring_xdp(ring) \
 	clear_bit(__IXGBE_TX_XDP_RING, &(ring)->state)
 #define ring_is_xsk(ring) \
-	test_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+	test_bit(__IXGBE_RXTX_XSK_RING, &(ring)->state)
 #define set_ring_xsk(ring) \
-	set_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+	set_bit(__IXGBE_RXTX_XSK_RING, &(ring)->state)
 #define clear_ring_xsk(ring) \
-	clear_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
+	clear_bit(__IXGBE_RXTX_XSK_RING, &(ring)->state)
 struct ixgbe_ring {
 	union {
 		struct libie_xg_ring base;
