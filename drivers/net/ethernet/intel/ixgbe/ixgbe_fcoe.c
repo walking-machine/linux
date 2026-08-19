@@ -486,7 +486,7 @@ int ixgbe_fcoe_ddp(struct ixgbe_adapter *adapter,
  * Returns : 0 indicates success, < 0 for error
  */
 int ixgbe_fso(struct ixgbe_ring *tx_ring,
-	      struct ixgbe_tx_buffer *first,
+	      struct libie_xg_tx_buffer *first,
 	      u8 *hdr_len)
 {
 	struct sk_buff *skb = first->skb;

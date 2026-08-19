@@ -965,7 +965,6 @@ static int ixgbe_alloc_q_vector(struct ixgbe_adapter *adapter,
 
 	while (rxr_count) {
 		/* assign generic ring traits */
-		ring->dev = &adapter->pdev->dev;
 		ring->netdev = adapter->netdev;
 
 		/* configure backlink on ring */

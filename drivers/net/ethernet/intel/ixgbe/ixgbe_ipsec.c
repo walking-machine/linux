@@ -1054,7 +1054,7 @@ int ixgbe_ipsec_vf_del_sa(struct ixgbe_adapter *adapter, u32 *msgbuf, u32 vf)
  * @itd: ipsec Tx data for later use in building context descriptor
  **/
 int ixgbe_ipsec_tx(struct ixgbe_ring *tx_ring,
-		   struct ixgbe_tx_buffer *first,
+		   struct libie_xg_tx_buffer *first,
 		   struct ixgbe_ipsec_tx_data *itd)
 {
 	struct ixgbe_adapter *adapter = ixgbe_from_netdev(tx_ring->netdev);

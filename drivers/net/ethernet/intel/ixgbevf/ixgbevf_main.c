@@ -271,7 +271,7 @@ static bool ixgbevf_clean_tx_irq(struct ixgbevf_q_vector *q_vector,
 				 struct ixgbevf_ring *tx_ring, int napi_budget)
 {
 	struct ixgbevf_adapter *adapter = q_vector->adapter;
-	struct ixgbevf_tx_buffer *tx_buffer;
+	struct libie_xg_tx_buffer *tx_buffer;
 	union ixgbe_adv_tx_desc *tx_desc;
 	unsigned int total_bytes = 0, total_packets = 0, total_ipsec = 0;
 	unsigned int budget = tx_ring->count / 2;
@@ -503,54 +503,19 @@ static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
 
 void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring)
 {
-	ixgbevf_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
+	libie_xg_clean_xdp_num(&xdp_ring->base, false, xdp_ring->pending,
+			       ring_is_xsk(xdp_ring));
 	libeth_xdpsq_put(&xdp_ring->xdpq_lock, xdp_ring->netdev);
-}
-
-static void ixgbevf_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
-				  const struct libeth_xdpsq *sq,
-				  u64 priv)
-{
-	union ixgbe_adv_tx_desc *tx_desc =
-		&((union ixgbe_adv_tx_desc *)sq->descs)[i];
-
-	u32 cmd_type = IXGBE_ADVTXD_DTYP_DATA |
-		       IXGBE_ADVTXD_DCMD_DEXT |
-		       IXGBE_ADVTXD_DCMD_IFCS |
-		       desc.len;
-
-	if (desc.flags & LIBETH_XDP_TX_LAST)
-		cmd_type |= IXGBE_TXD_CMD_EOP;
-
-	if (desc.flags & LIBETH_XDP_TX_FIRST) {
-		struct libeth_sqe *sqe = &sq->sqes[i];
-		struct skb_shared_info *sinfo;
-		u16 full_len = desc.len;
-
-		if (desc.flags & LIBETH_XDP_TX_MULTI) {
-			sinfo = sqe->type == LIBETH_SQE_XDP_TX ?
-				sqe->sinfo :
-				xdp_get_shared_info_from_frame(sqe->xdpf);
-			full_len += sinfo->xdp_frags_size;
-		}
-
-		tx_desc->read.olinfo_status =
-			cpu_to_le32((full_len << IXGBE_ADVTXD_PAYLEN_SHIFT) |
-				    IXGBE_ADVTXD_CC);
-	}
-
-	tx_desc->read.buffer_addr = cpu_to_le64(desc.addr);
-	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
 }
 
 LIBETH_XDP_DEFINE_START();
 LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbevf_xdp_flush_tx, ixgbevf_prep_xdp_sq,
-			   ixgbevf_xdp_xmit_desc);
+			   libie_xg_xdp_xmit_desc);
 LIBETH_XDP_DEFINE_FLUSH_XMIT(static ixgbevf_xdp_flush_xmit, ixgbevf_prep_xdp_sq,
-			     ixgbevf_xdp_xmit_desc);
+			     libie_xg_xdp_xmit_desc);
 LIBETH_XDP_DEFINE_RUN_PROG(static ixgbevf_xdp_run_prog, ixgbevf_xdp_flush_tx);
 LIBETH_XDP_DEFINE_FINALIZE(static ixgbevf_xdp_finalize_xdp_napi,
-			   ixgbevf_xdp_flush_tx, ixgbevf_xdp_rs_and_bump);
+			   ixgbevf_xdp_flush_tx, libie_xg_xdp_rs_and_bump);
 LIBETH_XDP_DEFINE_END();
 
 static u32 ixgbevf_rx_hsplit_wa(const struct libeth_fqe *hdr,
@@ -713,7 +678,7 @@ static int ixgbevf_xdp_xmit(struct net_device *dev, int n,
 	return libeth_xdp_xmit_do_bulk(dev, n, frames, flags, adapter->xdp_ring,
 				       adapter->num_xdp_queues,
 				       ixgbevf_xdp_flush_xmit,
-				       ixgbevf_xdp_rs_and_bump);
+				       libie_xg_xdp_rs_and_bump);
 }
 
 /**
@@ -1215,7 +1180,7 @@ void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 	/* reinitialize tx_buffer_info */
 	if (!ring_is_xdp(ring)) {
 		memset(ring->tx_buffer_info, 0,
-		       sizeof(struct ixgbevf_tx_buffer) * ring->count);
+		       sizeof(struct libie_xg_tx_buffer) * ring->count);
 	} else {
 		memset(ring->xdp_sqes, 0,
 		       sizeof(struct libeth_sqe) * ring->count);
@@ -1457,6 +1422,7 @@ void ixgbevf_rx_destroy_pp(struct ixgbevf_ring *rx_ring)
 	rx_ring->hdr_pp = NULL;
 }
 
+// TODO : rename to create_fq
 static int ixgbevf_rx_create_pp(struct ixgbevf_ring *rx_ring)
 {
 	u32 adapter_flags = rx_ring->q_vector->adapter->flags;
@@ -2058,7 +2024,7 @@ reset:
 void ixgbevf_clean_tx_ring(struct ixgbevf_ring *tx_ring)
 {
 	u16 i = tx_ring->next_to_clean;
-	struct ixgbevf_tx_buffer *tx_buffer = &tx_ring->tx_buffer_info[i];
+	struct libie_xg_tx_buffer *tx_buffer = &tx_ring->tx_buffer_info[i];
 
 	while (i != tx_ring->next_to_use) {
 		union ixgbe_adv_tx_desc *eop_desc, *tx_desc;
@@ -3072,7 +3038,7 @@ int ixgbevf_setup_tx_resources(struct ixgbevf_ring *tx_ring)
 	struct ixgbevf_adapter *adapter = netdev_priv(tx_ring->netdev);
 	int size;
 
-	size = (!ring_is_xdp(tx_ring) ? sizeof(struct ixgbevf_tx_buffer) :
+	size = (!ring_is_xdp(tx_ring) ? sizeof(struct libie_xg_tx_buffer) :
 		sizeof(struct libeth_sqe)) * tx_ring->count;
 
 	tx_ring->tx_buffer_info = vmalloc(size);
@@ -3415,7 +3381,7 @@ static void ixgbevf_tx_ctxtdesc(struct ixgbevf_ring *tx_ring,
 }
 
 static int ixgbevf_tso(struct ixgbevf_ring *tx_ring,
-		       struct ixgbevf_tx_buffer *first,
+		       struct libie_xg_tx_buffer *first,
 		       u8 *hdr_len,
 		       struct ixgbevf_ipsec_tx_data *itd)
 {
@@ -3512,7 +3478,7 @@ static int ixgbevf_tso(struct ixgbevf_ring *tx_ring,
 }
 
 static void ixgbevf_tx_csum(struct ixgbevf_ring *tx_ring,
-			    struct ixgbevf_tx_buffer *first,
+			    struct libie_xg_tx_buffer *first,
 			    struct ixgbevf_ipsec_tx_data *itd)
 {
 	struct sk_buff *skb = first->skb;
@@ -3608,11 +3574,11 @@ static void ixgbevf_tx_olinfo_status(union ixgbe_adv_tx_desc *tx_desc,
 }
 
 static void ixgbevf_tx_map(struct ixgbevf_ring *tx_ring,
-			   struct ixgbevf_tx_buffer *first,
+			   struct libie_xg_tx_buffer *first,
 			   const u8 hdr_len)
 {
 	struct sk_buff *skb = first->skb;
-	struct ixgbevf_tx_buffer *tx_buffer;
+	struct libie_xg_tx_buffer *tx_buffer;
 	union ixgbe_adv_tx_desc *tx_desc;
 	skb_frag_t *frag;
 	dma_addr_t dma;
@@ -3776,7 +3742,7 @@ static int ixgbevf_maybe_stop_tx(struct ixgbevf_ring *tx_ring, int size)
 static int ixgbevf_xmit_frame_ring(struct sk_buff *skb,
 				   struct ixgbevf_ring *tx_ring)
 {
-	struct ixgbevf_tx_buffer *first;
+	struct libie_xg_tx_buffer *first;
 	int tso;
 	u32 tx_flags = 0;
 	u16 count = TXD_USE_COUNT(skb_headlen(skb));

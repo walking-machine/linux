@@ -10,6 +10,7 @@
 #include <linux/io.h>
 #include <linux/netdevice.h>
 #include <linux/if_vlan.h>
+#include <linux/net/intel/libie/xg_ring.h>
 #include <linux/u64_stats_sync.h>
 #include <net/libeth/types.h>
 #include <net/xdp.h>
@@ -23,25 +24,6 @@
 /* Tx Descriptors needed, worst case */
 #define TXD_USE_COUNT(S) DIV_ROUND_UP((S), IXGBE_MAX_DATA_PER_TXD)
 #define DESC_NEEDED (MAX_SKB_FRAGS + 4)
-
-/* wrapper around a pointer to a socket buffer,
- * so a DMA handle can be stored along with the buffer
- */
-struct ixgbevf_tx_buffer {
-	union ixgbe_adv_tx_desc *next_to_watch;
-	unsigned long time_stamp;
-	union {
-		struct sk_buff *skb;
-		/* XDP uses address ptr on irq_clean */
-		void *data;
-	};
-	unsigned int bytecount;
-	unsigned short gso_segs;
-	__be16 protocol;
-	DEFINE_DMA_UNMAP_ADDR(dma);
-	DEFINE_DMA_UNMAP_LEN(len);
-	u32 tx_flags;
-};
 
 struct ixgbevf_stats {
 	u64 packets;
@@ -84,30 +66,16 @@ enum ixgbevf_ring_state_t {
 		clear_bit(__IXGBEVF_RXTX_XSK_RING, &(ring)->state)
 
 struct ixgbevf_ring {
+	union {
+		struct libie_xg_ring base;
+		struct libie_xg_ring;
+	};
 	struct ixgbevf_ring *next;
 	struct ixgbevf_q_vector *q_vector;	/* backpointer to q_vector */
 	struct net_device *netdev;
 	struct bpf_prog __rcu *xdp_prog;
-	union {
-		struct page_pool *pp;	/* Rx and XDP rings */
-		struct device *dev;	/* Tx ring */
-	};
-	void *desc;			/* descriptor ring memory */
 	u32 truesize;			/* Rx buffer full size */
 	u32 hdr_truesize;		/* Rx header buffer full size */
-	u16 count;			/* amount of descriptors */
-	u16 next_to_clean;
-	u32 next_to_use;
-	u32 pending;			/* Sent-not-completed descriptors */
-
-	union {
-		struct libeth_fqe *rx_fqes;
-		struct libeth_xdp_buff	**xsk_fqes;
-		struct ixgbevf_tx_buffer *tx_buffer_info;
-		struct libeth_sqe *xdp_sqes;
-	};
-	struct libeth_xdpsq_lock xdpq_lock;
-	u32 cached_ntu;
 	u32 thresh;
 	unsigned long state;
 	struct ixgbevf_stats stats;
@@ -120,7 +88,6 @@ struct ixgbevf_ring {
 	struct page_pool *hdr_pp;
 	struct xdp_rxq_info xdp_rxq;
 	u64 hw_csum_rx_error;
-	u8 __iomem *tail;
 
 	/* holds the special value that gets the hardware register offset
 	 * associated with this ring, which is different for DCB and RSS modes
@@ -129,10 +96,8 @@ struct ixgbevf_ring {
 	int queue_index; /* needed for multiqueue queue management */
 	u32 rx_buf_len;
 	struct libeth_xdp_buff_stash xdp_stash;
-	struct libeth_xdp_buff *xsk_xdp_head;
 	unsigned int dma_size;		/* length in bytes */
 	dma_addr_t dma;			/* phys. address of descriptor ring */
-	struct xsk_buff_pool *xsk_pool; /* AF_XDP ZC rings */
 } ____cacheline_internodealigned_in_smp;
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
@@ -444,7 +409,7 @@ void ixgbevf_ipsec_rx(struct ixgbevf_ring *rx_ring,
 		      union ixgbe_adv_rx_desc *rx_desc,
 		      struct sk_buff *skb);
 int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring,
-		     struct ixgbevf_tx_buffer *first,
+		     struct libie_xg_tx_buffer *first,
 		     struct ixgbevf_ipsec_tx_data *itd);
 #else
 static inline void ixgbevf_init_ipsec_offload(struct ixgbevf_adapter *adapter)
@@ -456,7 +421,7 @@ static inline void ixgbevf_ipsec_rx(struct ixgbevf_ring *rx_ring,
 				    union ixgbe_adv_rx_desc *rx_desc,
 				    struct sk_buff *skb) { }
 static inline int ixgbevf_ipsec_tx(struct ixgbevf_ring *tx_ring,
-				   struct ixgbevf_tx_buffer *first,
+				   struct libie_xg_tx_buffer *first,
 				   struct ixgbevf_ipsec_tx_data *itd)
 { return 0; }
 #endif /* CONFIG_IXGBEVF_IPSEC */

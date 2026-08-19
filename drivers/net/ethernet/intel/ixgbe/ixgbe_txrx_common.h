@@ -10,11 +10,6 @@
 #define IXGBE_XDP_REDIR		BIT(2)
 #define IXGBE_XDP_EXIT		BIT(3)
 
-#define IXGBE_TXD_CMD (IXGBE_TXD_CMD_EOP | \
-		       IXGBE_TXD_CMD_RS)
-
-int ixgbe_xmit_xdp_ring(struct ixgbe_ring *ring,
-			struct xdp_frame *xdpf);
 bool ixgbe_cleanup_headers(struct ixgbe_ring *rx_ring,
 			   union ixgbe_adv_rx_desc *rx_desc,
 			   struct sk_buff *skb);
@@ -44,7 +39,6 @@ void ixgbe_xsk_clean_rx_ring(struct ixgbe_ring *rx_ring);
 bool ixgbe_clean_xdp_tx_irq(struct ixgbe_q_vector *q_vector,
 			    struct ixgbe_ring *tx_ring, int napi_budget);
 int ixgbe_xsk_wakeup(struct net_device *dev, u32 queue_id, u32 flags);
-void ixgbe_xsk_clean_tx_ring(struct ixgbe_ring *tx_ring);
 
 void ixgbe_update_tx_ring_stats(struct ixgbe_ring *tx_ring,
 				struct ixgbe_q_vector *q_vector, u64 pkts,
@@ -52,5 +46,7 @@ void ixgbe_update_tx_ring_stats(struct ixgbe_ring *tx_ring,
 void ixgbe_update_rx_ring_stats(struct ixgbe_ring *rx_ring,
 				struct ixgbe_q_vector *q_vector, u64 pkts,
 				u64 bytes);
+
+u32 ixgbe_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq);
 
 #endif /* #define _IXGBE_TXRX_COMMON_H_ */
