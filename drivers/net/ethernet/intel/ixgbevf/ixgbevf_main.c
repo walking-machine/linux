@@ -84,6 +84,7 @@ MODULE_DEVICE_TABLE(pci, ixgbevf_pci_tbl);
 
 MODULE_DESCRIPTION("Intel(R) 10 Gigabit Virtual Function Network Driver");
 MODULE_IMPORT_NS("LIBETH");
+MODULE_IMPORT_NS("LIBETH_XDP");
 MODULE_LICENSE("GPL v2");
 
 #define DEFAULT_MSG_ENABLE (NETIF_MSG_DRV|NETIF_MSG_PROBE|NETIF_MSG_LINK)
@@ -3136,7 +3137,7 @@ int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 		.count		= rx_ring->count,
 		.nid		= NUMA_NO_NODE,
 		.type		= LIBETH_FQE_MTU,
-		.xdp		= !!rx_ring->xdp_prog,
+		.xdp		= !!adapter->xdp_prog,
 		.buf_len	= IXGBEVF_RX_PAGE_LEN(rx_ring->xdp_prog ?
 						      LIBETH_XDP_HEADROOM :
 						      LIBETH_SKB_HEADROOM),
@@ -3165,21 +3166,26 @@ int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 		ret = -ENOMEM;
 		dev_err(&adapter->pdev->dev,
 			"Unable to allocate memory for the Rx descriptor ring\n");
-		goto err;
+		goto destroy_fq;
 	}
 
 	/* XDP RX-queue info */
 	ret = __xdp_rxq_info_reg(&rx_ring->xdp_rxq, adapter->netdev,
 				 rx_ring->queue_index, 0, rx_ring->truesize);
 	if (ret)
-		goto err;
+		goto free_desc;
 
 	xdp_rxq_info_attach_page_pool(&rx_ring->xdp_rxq, fq.pp);
 
 	rcu_assign_pointer(rx_ring->xdp_prog, adapter->xdp_prog);
 
 	return 0;
-err:
+
+free_desc:
+	dma_free_coherent(fq.pp->p.dev, rx_ring->size, rx_ring->desc,
+			  rx_ring->dma);
+	rx_ring->desc = NULL;
+destroy_fq:
 	libeth_rx_fq_destroy(&fq);
 	rx_ring->rx_fqes = NULL;
 	rx_ring->pp = NULL;
