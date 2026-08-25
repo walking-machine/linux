@@ -846,10 +846,8 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		xdp->data = NULL;
 
 		/* verify the packet layout is correct */
-		if (unlikely(ixgbevf_cleanup_headers(rx_ring, rx_desc, skb))) {
-			skb = NULL;
+		if (unlikely(ixgbevf_cleanup_headers(rx_ring, rx_desc, skb)))
 			continue;
-		}
 
 		/* Workaround hardware that can't do proper VEPA multicast
 		 * source pruning.

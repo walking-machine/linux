@@ -133,9 +133,8 @@ struct ixgbevf_ring {
 #define IXGBEVF_MAX_RXD		4096
 #define IXGBEVF_MIN_RXD		64
 
-/* Supported Rx Buffer Sizes */
+/* Fixed Rx Buffer Sizes */
 #define IXGBEVF_RXBUFFER_256	256
-#define IXGBEVF_RXBUFFER_3072	3072
 
 #define IXGBEVF_RX_HDR_SIZE	IXGBEVF_RXBUFFER_256
 

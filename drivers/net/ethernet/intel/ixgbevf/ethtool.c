@@ -324,6 +324,10 @@ static int ixgbevf_set_ringparam(struct net_device *netdev,
 			/* clone ring and setup updated count */
 			rx_ring[i] = *adapter->rx_ring[i];
 
+			rx_ring[i].next_to_clean = 0;
+			rx_ring[i].next_to_use = 0;
+			rx_ring[i].xdp_stash.data = NULL;
+
 			/* Clear copied XDP RX-queue info */
 			memset(&rx_ring[i].xdp_rxq, 0,
 			       sizeof(rx_ring[i].xdp_rxq));
