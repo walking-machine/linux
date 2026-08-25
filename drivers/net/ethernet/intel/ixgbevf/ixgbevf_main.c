@@ -735,10 +735,8 @@ static void ixgbevf_add_rx_frag(struct ixgbevf_ring *rx_ring,
 				struct sk_buff *skb,
 				unsigned int size)
 {
-	unsigned int truesize = SKB_DATA_ALIGN(IXGBEVF_SKB_PAD + size);
-
 	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, rx_buffer->page,
-			rx_buffer->page_offset, size, truesize);
+			rx_buffer->page_offset, size, PAGE_SIZE);
 }
 
 static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
@@ -750,14 +748,9 @@ static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
 }
 
 static struct sk_buff *ixgbevf_build_skb(struct ixgbevf_ring *rx_ring,
-					 struct ixgbevf_rx_buffer *rx_buffer,
-					 struct xdp_buff *xdp,
-					 union ixgbe_adv_rx_desc *rx_desc)
+					 struct xdp_buff *xdp)
 {
 	unsigned int metasize = xdp->data - xdp->data_meta;
-	unsigned int truesize = SKB_DATA_ALIGN(sizeof(struct skb_shared_info)) +
-				SKB_DATA_ALIGN(xdp->data_end -
-					       xdp->data_hard_start);
 	struct sk_buff *skb;
 
 	/* Prefetch first cache line of first page. If xdp->data_meta
@@ -768,7 +761,7 @@ static struct sk_buff *ixgbevf_build_skb(struct ixgbevf_ring *rx_ring,
 	net_prefetch(xdp->data_meta);
 
 	/* build an skb around the page buffer */
-	skb = napi_build_skb(xdp->data_hard_start, truesize);
+	skb = napi_build_skb(xdp->data_hard_start, PAGE_SIZE);
 	if (unlikely(!skb))
 		return NULL;
 
@@ -913,8 +906,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 	struct xdp_buff xdp;
 	int xdp_res = 0;
 
-	/* Frame size depend on rx_ring setup when PAGE_SIZE=4K */
-	xdp_init_buff(&xdp, IXGBEVF_RXBUFFER_3072, &rx_ring->xdp_rxq);
+	xdp_init_buff(&xdp, PAGE_SIZE, &rx_ring->xdp_rxq);
 
 	while (likely(total_rx_packets < budget)) {
 		struct ixgbevf_rx_buffer *rx_buffer;
@@ -938,17 +930,15 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		 */
 		rmb();
 
-		rx_buffer =
-			ixgbevf_get_rx_buffer(rx_ring, IXGBEVF_RXBUFFER_3072);
+		rx_buffer = ixgbevf_get_rx_buffer(rx_ring, size);
 
 		/* retrieve a buffer from the ring */
 		if (!skb) {
-			unsigned int offset = rx_buffer->page_offset;
 			unsigned char *hard_start;
 
-			hard_start = page_address(rx_buffer->page) +
-				     rx_buffer->page_offset - offset;
-			xdp_prepare_buff(&xdp, hard_start, offset, size, true);
+			hard_start = page_address(rx_buffer->page);
+			xdp_prepare_buff(&xdp, hard_start,
+					 rx_buffer->page_offset, size, true);
 			xdp_res = ixgbevf_run_xdp(adapter, rx_ring, &xdp);
 		}
 
@@ -961,8 +951,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		} else if (skb) {
 			ixgbevf_add_rx_frag(rx_ring, rx_buffer, skb, size);
 		} else {
-			skb = ixgbevf_build_skb(rx_ring, rx_buffer,
-						&xdp, rx_desc);
+			skb = ixgbevf_build_skb(rx_ring, &xdp);
 		}
 
 		/* exit if we failed to retrieve a buffer */
@@ -4209,11 +4198,9 @@ static int ixgbevf_xdp_setup(struct net_device *dev, struct bpf_prog *prog)
 	struct ixgbevf_adapter *adapter = netdev_priv(dev);
 	struct bpf_prog *old_prog;
 
-	/* verify ixgbevf ring attributes are sufficient for XDP */
-	for (i = 0; i < adapter->num_rx_queues; i++) {
-		if (frame_size > IXGBEVF_RXBUFFER_3072)
-			return -EINVAL;
-	}
+	/* reject if multi-buffer would be needed */
+	if (frame_size > IXGBEVF_RXBUFFER_3072)
+		return -EINVAL;
 
 	old_prog = xchg(&adapter->xdp_prog, prog);
 
