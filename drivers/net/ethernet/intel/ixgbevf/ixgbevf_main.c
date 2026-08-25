@@ -1905,13 +1905,10 @@ static void ixgbevf_set_rx_buffer_len(struct ixgbevf_adapter *adapter,
 	/* set buffer size flags */
 	clear_ring_uses_large_buffer(rx_ring);
 
-	if (PAGE_SIZE < 8192)
-		/* 82599 can't rely on RXDCTL.RLPML to restrict
-		 * the size of the frame
-		 */
-		if (max_frame > IXGBEVF_MAX_FRAME_BUILD_SKB ||
-		    adapter->hw.mac.type == ixgbe_mac_82599_vf)
-			set_ring_uses_large_buffer(rx_ring);
+	/* 82599 can't rely on RXDCTL.RLPML to restrict the size of the frame */
+	if ((PAGE_SIZE < 8192 && max_frame > IXGBEVF_MAX_FRAME_BUILD_SKB) ||
+	    adapter->hw.mac.type == ixgbe_mac_82599_vf)
+		set_ring_uses_large_buffer(rx_ring);
 }
 
 /**
