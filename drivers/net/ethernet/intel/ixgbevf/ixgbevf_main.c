@@ -813,7 +813,10 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 				size -= hdr_size ? : size;
 			}
 
-			libeth_xdp_process_buff(xdp, hdr_buff, hdr_size);
+			if (likely(hdr_size))
+				libeth_xdp_prepare_buff(xdp, hdr_buff, hdr_size);
+			else
+				libeth_rx_recycle_slow(hdr_buff->netmem);
 		}
 
 		libeth_xdp_process_buff(xdp, rx_buffer, size);
@@ -1589,12 +1592,17 @@ static int ixgbevf_rx_create_pp(struct ixgbevf_ring *rx_ring)
 
 	/* Some HW requires DMA write sizes to be aligned to 1K,
 	 * which warrants fake header split usage, but this is
-	 * not an issue if the frame size is at its maximum of 3K
+	 * not an issue if the frame size is at its maximum, e.g. 3K
 	 */
 	frame_size =
 		IXGBEVF_RX_SRRCTL_BUF_SIZE(READ_ONCE(rx_ring->netdev->mtu));
 	fq.hsplit = (adapter_flags & IXGBEVF_FLAG_HSPLIT) &&
 		    frame_size < fq.buf_len;
+	if (fq.hsplit) {
+		fq.type = LIBETH_FQE_SHORT;
+		fq.truesize = frame_size;
+	}
+
 	ret = libeth_rx_fq_create(&fq, &rx_ring->q_vector->napi);
 	if (ret)
 		return ret;
@@ -3303,11 +3311,6 @@ err_setup_rx:
  **/
 void ixgbevf_free_rx_resources(struct ixgbevf_ring *rx_ring)
 {
-	struct libeth_fq fq = {
-		.fqes	= rx_ring->rx_fqes,
-		.pp	= rx_ring->pp,
-	};
-
 	ixgbevf_clean_rx_ring(rx_ring);
 
 	rcu_assign_pointer(rx_ring->xdp_prog, NULL);
@@ -3318,9 +3321,7 @@ void ixgbevf_free_rx_resources(struct ixgbevf_ring *rx_ring)
 			  rx_ring->dma);
 	rx_ring->desc = NULL;
 
-	libeth_rx_fq_destroy(&fq);
-	rx_ring->rx_fqes = NULL;
-	rx_ring->pp = NULL;
+	ixgbevf_rx_destroy_pp(rx_ring);
 }
 
 /**
