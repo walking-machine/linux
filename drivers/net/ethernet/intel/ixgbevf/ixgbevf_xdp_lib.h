@@ -8,34 +8,7 @@
 
 #include "ixgbevf.h"
 
-static inline u16 ixgbevf_tx_get_num_sent(struct ixgbevf_ring *xdp_ring)
-{
-	u16 ntc = xdp_ring->next_to_clean;
-	u16 to_clean = 0;
-
-	while (likely(to_clean < xdp_ring->pending)) {
-		u32 idx = xdp_ring->xdp_sqes[ntc].rs_idx;
-		union ixgbe_adv_tx_desc *rs_desc;
-
-		if (!idx--)
-			break;
-
-		rs_desc = IXGBEVF_TX_DESC(xdp_ring, idx);
-
-		if (!(rs_desc->wb.status & cpu_to_le32(IXGBE_TXD_STAT_DD)))
-			break;
-
-		xdp_ring->xdp_sqes[ntc].rs_idx = 0;
-
-		to_clean +=
-			(idx >= ntc ? idx : idx + xdp_ring->count) - ntc + 1;
-
-		ntc = (idx + 1 == xdp_ring->count) ? 0 : idx + 1;
-	}
-
-	return to_clean;
-}
-
+// TODO : delete in_napi during rebase
 static inline void ixgbevf_clean_xdp_num(struct ixgbevf_ring *xdp_ring,
 					 bool in_napi, u16 to_clean)
 {
@@ -62,16 +35,46 @@ static inline void ixgbevf_clean_xdp_num(struct ixgbevf_ring *xdp_ring,
 	xdp_flush_frame_bulk(&cbulk);
 }
 
+static inline u16 ixgbevf_xdp_complete(struct ixgbevf_ring *xdp_ring,
+				       u32 budget)
+{
+	u16 cleaned = 0;
+
+	while (likely(cleaned < budget)) {
+		u16 ntc = xdp_ring->next_to_clean;
+		u32 idx = xdp_ring->xdp_sqes[ntc].rs_idx;
+		union ixgbe_adv_tx_desc *rs_desc;
+		u16 to_clean;
+
+		if (!idx--)
+			break;
+
+		rs_desc = IXGBEVF_TX_DESC(xdp_ring, idx);
+
+		if (!(rs_desc->wb.status & cpu_to_le32(IXGBE_TXD_STAT_DD)))
+			break;
+
+		xdp_ring->xdp_sqes[ntc].rs_idx = 0;
+
+		to_clean =
+			(idx >= ntc ? idx : idx + xdp_ring->count) - ntc + 1;
+		ixgbevf_clean_xdp_num(xdp_ring, false, to_clean);
+		cleaned += to_clean;
+
+		ntc = xdp_ring->next_to_clean;
+	}
+
+	return cleaned;
+}
+
 static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 {
 	struct ixgbevf_ring *xdp_ring = xdpsq;
 
-	if (unlikely(ixgbevf_desc_unused(xdp_ring) < LIBETH_XDP_TX_BULK)) {
-		u16 to_clean = ixgbevf_tx_get_num_sent(xdp_ring);
-
-		if (likely(to_clean))
-			ixgbevf_clean_xdp_num(xdp_ring, true, to_clean);
-	}
+	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
+	if (unlikely(ixgbevf_desc_unused(xdp_ring) <
+		     libeth_xdp_queue_threshold(xdp_ring->count)))
+		ixgbevf_xdp_complete(xdpsq, xdp_ring->pending);
 
 	if (unlikely(!test_bit(__IXGBEVF_TX_XDP_RING_PRIMED,
 			       &xdp_ring->state))) {
@@ -99,7 +102,7 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 	*sq = (struct libeth_xdpsq) {
 		.count = xdp_ring->count,
 		.descs = xdp_ring->desc,
-		.lock = NULL,
+		.lock = &xdp_ring->xdpq_lock,
 		.ntu = &xdp_ring->next_to_use,
 		.pending = &xdp_ring->pending,
 		.pool = NULL,
@@ -107,6 +110,33 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 	};
 
 	return ixgbevf_desc_unused(xdp_ring);
+}
+
+static inline void ixgbevf_xdp_rs_and_bump(void *xdpsq, bool sent, bool flush)
+{
+	struct ixgbevf_ring *xdp_ring = xdpsq;
+	union ixgbe_adv_tx_desc *desc;
+	u32 ltu;
+
+	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
+
+	if ((!flush && xdp_ring->pending < xdp_ring->count - 1) ||
+	    xdp_ring->cached_ntu == xdp_ring->next_to_use)
+		goto unlock;
+
+	ltu = (xdp_ring->next_to_use ? : xdp_ring->count) - 1;
+	desc = IXGBEVF_TX_DESC(xdp_ring, ltu);
+	desc->read.cmd_type_len |= cpu_to_le32(IXGBE_TXD_CMD);
+
+	xdp_ring->xdp_sqes[xdp_ring->cached_ntu].rs_idx = ltu + 1;
+	xdp_ring->cached_ntu = xdp_ring->next_to_use;
+
+	/* Finish descriptor writes before bumping tail */
+	wmb();
+	ixgbevf_write_tail(xdp_ring, xdp_ring->next_to_use);
+
+unlock:
+	libeth_xdpsq_unlock(&xdp_ring->xdpq_lock);
 }
 
 #endif /* _IXGBEVF_XDP_LIB_H_ */

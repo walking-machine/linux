@@ -297,6 +297,8 @@ static int ixgbevf_set_ringparam(struct net_device *netdev,
 			/* clone ring and setup updated count */
 			tx_ring[i] = *adapter->xdp_ring[j];
 			tx_ring[i].count = new_tx_count;
+			tx_ring[i].xdpq_lock = (struct libeth_xdpsq_lock) {};
+			tx_ring[i].pending = 0;
 			err = ixgbevf_setup_tx_resources(&tx_ring[i]);
 			if (err) {
 				while (i) {

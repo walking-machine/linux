@@ -655,6 +655,7 @@ static inline void ixgbevf_irq_enable_queues(struct ixgbevf_adapter *adapter,
 
 static void ixgbevf_clean_xdp_ring(struct ixgbevf_ring *xdp_ring)
 {
+	libeth_xdpsq_deinit_timer(xdp_ring->xdp_timer);
 	ixgbevf_clean_xdp_num(xdp_ring, false, xdp_ring->pending);
 }
 
@@ -689,40 +690,31 @@ static void ixgbevf_xdp_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 	tx_desc->read.cmd_type_len = cpu_to_le32(cmd_type);
 }
 
+static void ixgbevf_xdp_finalize(void *xdpsq, bool sent, bool flush)
+{
+	struct ixgbevf_ring *xdp_ring = xdpsq;
+
+	ixgbevf_xdp_rs_and_bump(xdpsq, sent, flush);
+	if (flush)
+		libeth_xdpsq_queue_timer(xdp_ring->xdp_timer);
+}
+
+static u32 ixgbevf_xdp_complete_late(void *xdpsq, u32 budget)
+{
+	struct ixgbevf_ring *xdp_ring = xdpsq;
+
+	ixgbevf_xdp_complete(xdp_ring, min_t(u32, budget, xdp_ring->pending));
+
+	return xdp_ring->pending;
+}
+
 LIBETH_XDP_DEFINE_START();
 LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbevf_xdp_flush_tx, ixgbevf_prep_xdp_sq,
 			   ixgbevf_xdp_xmit_desc);
+LIBETH_XDP_DEFINE_FINALIZE(static ixgbevf_xdp_finalize_xdp_napi,
+			   ixgbevf_xdp_flush_tx, ixgbevf_xdp_finalize);
+LIBETH_XDP_DEFINE_TIMER(static ixgbevf_xdp_task, ixgbevf_xdp_complete_late);
 LIBETH_XDP_DEFINE_END();
-
-static void ixgbevf_xdp_set_rs(struct ixgbevf_ring *xdp_ring, u32 cached_ntu)
-{
-	u32 ltu = (xdp_ring->next_to_use ? : xdp_ring->count) - 1;
-	union ixgbe_adv_tx_desc *desc;
-
-	desc = IXGBEVF_TX_DESC(xdp_ring, ltu);
-	xdp_ring->xdp_sqes[cached_ntu].rs_idx = ltu + 1;
-	desc->read.cmd_type_len |= cpu_to_le32(IXGBE_TXD_CMD);
-}
-
-static void ixgbevf_rx_finalize_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
-				    bool xdp_xmit, u32 cached_ntu)
-{
-	struct ixgbevf_ring *xdp_ring = tx_bulk->xdpsq;
-
-	if (!xdp_xmit)
-		goto unlock;
-
-	if (tx_bulk->count)
-		ixgbevf_xdp_flush_tx(tx_bulk, LIBETH_XDP_TX_DROP);
-
-	ixgbevf_xdp_set_rs(xdp_ring, cached_ntu);
-
-	/* Finish descriptor writes before bumping tail */
-	wmb();
-	ixgbevf_write_tail(xdp_ring, xdp_ring->next_to_use);
-unlock:
-	rcu_read_unlock();
-}
 
 static int ixgbevf_run_xdp(struct libeth_xdp_tx_bulk *tx_bulk,
 			   struct libeth_xdp_buff *xdp)
@@ -769,17 +761,11 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 	u16 cleaned_count = ixgbevf_desc_unused(rx_ring);
 	LIBETH_XDP_ONSTACK_BULK(xdp_tx_bulk);
 	LIBETH_XDP_ONSTACK_BUFF(xdp);
-	u32 cached_ntu;
-	bool xdp_xmit = false;
-	int xdp_res = 0;
 
 	libeth_xdp_init_buff(xdp, &rx_ring->xdp_stash, &rx_ring->xdp_rxq);
 	libeth_xdp_tx_init_bulk(&xdp_tx_bulk, rx_ring->xdp_prog,
 				adapter->netdev, adapter->xdp_ring,
 				adapter->num_xdp_queues);
-	if (xdp_tx_bulk.prog)
-		cached_ntu =
-			((struct ixgbevf_ring *)xdp_tx_bulk.xdpsq)->next_to_use;
 
 	while (likely(total_rx_packets < budget)) {
 		union ixgbe_adv_rx_desc *rx_desc;
@@ -816,11 +802,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 		total_rx_packets++;
 		total_rx_bytes += xdp_get_buff_len(&xdp->base);
 
-		xdp_res = ixgbevf_run_xdp(&xdp_tx_bulk, xdp);
-		if (xdp_res) {
-			if (xdp_res == IXGBEVF_XDP_TX)
-				xdp_xmit = true;
-
+		if (ixgbevf_run_xdp(&xdp_tx_bulk, xdp)) {
 			xdp->data = NULL;
 			continue;
 		}
@@ -860,7 +842,7 @@ static int ixgbevf_clean_rx_irq(struct ixgbevf_q_vector *q_vector,
 	/* place incomplete frames back on ring for completion */
 	libeth_xdp_save_buff(&rx_ring->xdp_stash, xdp);
 
-	ixgbevf_rx_finalize_xdp(&xdp_tx_bulk, xdp_xmit, cached_ntu);
+	ixgbevf_xdp_finalize_xdp_napi(&xdp_tx_bulk);
 
 	u64_stats_update_begin(&rx_ring->syncp);
 	rx_ring->stats.packets += total_rx_packets;
@@ -1332,6 +1314,7 @@ static void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 	ring->next_to_clean = 0;
 	ring->next_to_use = 0;
 	ring->pending = 0;
+	ring->cached_ntu = 0;
 
 	/* In order to avoid issues WTHRESH + PTHRESH should always be equal
 	 * to or less than the number of on chip descriptors, which is
@@ -2962,13 +2945,18 @@ static void ixgbevf_service_task(struct work_struct *work)
  **/
 void ixgbevf_free_tx_resources(struct ixgbevf_ring *tx_ring)
 {
-	if (!ring_is_xdp(tx_ring))
+	if (!ring_is_xdp(tx_ring)) {
 		ixgbevf_clean_tx_ring(tx_ring);
-	else
+		vfree(tx_ring->tx_buffer_info);
+		tx_ring->tx_buffer_info = NULL;
+	} else {
 		ixgbevf_clean_xdp_ring(tx_ring);
-
-	vfree(tx_ring->tx_buffer_info);
-	tx_ring->tx_buffer_info = NULL;
+		vfree(tx_ring->xdp_sqes);
+		tx_ring->xdp_sqes = NULL;
+		libeth_xdpsq_put(&tx_ring->xdpq_lock, tx_ring->netdev);
+		kfree(tx_ring->xdp_timer);
+		tx_ring->xdp_timer = NULL;
+	}
 
 	/* if not set, then don't free */
 	if (!tx_ring->desc)
@@ -3016,6 +3004,18 @@ int ixgbevf_setup_tx_resources(struct ixgbevf_ring *tx_ring)
 	if (!tx_ring->tx_buffer_info)
 		goto err;
 
+	if (ring_is_xdp(tx_ring)) {
+		//TODO : replace with kzalloc_obj() after rebase
+		tx_ring->xdp_timer =
+			kzalloc(sizeof(*tx_ring->xdp_timer), GFP_KERNEL);
+		if (!tx_ring->xdp_timer)
+			goto free_buffs;
+		libeth_xdpsq_get(&tx_ring->xdpq_lock, tx_ring->netdev,
+				 libeth_xdpsq_shared(adapter->num_xdp_queues));
+		libeth_xdpsq_init_timer(tx_ring->xdp_timer, tx_ring,
+					&tx_ring->xdpq_lock, ixgbevf_xdp_task);
+	}
+
 	u64_stats_init(&tx_ring->syncp);
 
 	/* round up to nearest 4K */
@@ -3025,13 +3025,16 @@ int ixgbevf_setup_tx_resources(struct ixgbevf_ring *tx_ring)
 	tx_ring->desc = dma_alloc_coherent(tx_ring->dev, tx_ring->dma_size,
 					   &tx_ring->dma, GFP_KERNEL);
 	if (!tx_ring->desc)
-		goto err;
+		goto free_timer;
 
 	return 0;
 
-err:
+free_timer:
+	kfree(tx_ring->xdp_timer);
+free_buffs:
 	vfree(tx_ring->tx_buffer_info);
 	tx_ring->tx_buffer_info = NULL;
+err:
 	hw_dbg(&adapter->hw, "Unable to allocate memory for the transmit descriptor ring\n");
 	return -ENOMEM;
 }
@@ -4263,7 +4266,7 @@ static int ixgbevf_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 			    NETIF_F_HW_VLAN_CTAG_TX;
 
 	netdev->priv_flags |= IFF_UNICAST_FLT;
-	netdev->xdp_features = NETDEV_XDP_ACT_BASIC;
+	netdev->xdp_features = NETDEV_XDP_ACT_BASIC | NETDEV_XDP_ACT_RX_SG;
 
 	/* MTU range: 68 - 1504 or 9710 */
 	netdev->min_mtu = ETH_MIN_MTU;
