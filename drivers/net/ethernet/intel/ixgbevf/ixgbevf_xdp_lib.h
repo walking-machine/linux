@@ -10,10 +10,10 @@
 
 // TODO : delete in_napi during rebase
 static inline void ixgbevf_clean_xdp_num(struct ixgbevf_ring *xdp_ring,
-					 bool in_napi, u16 to_clean)
+					 bool in_napi, u16 to_clean,
+					 bool xsk_ring)
 {
 	struct libeth_xdpsq_napi_stats stats = { };
-	bool xsk_ring = ring_is_xsk(xdp_ring);
 	u32 ntc = xdp_ring->next_to_clean;
 	struct xdp_frame_bulk cbulk;
 	struct libeth_cq_pp cp = {
@@ -28,8 +28,7 @@ static inline void ixgbevf_clean_xdp_num(struct ixgbevf_ring *xdp_ring,
 	xdp_ring->pending -= to_clean;
 
 	while (likely(to_clean--)) {
-		xsk_frames += xsk_ring &&
-			likely(!xdp_ring->xdp_sqes[ntc].type) ? 1 : 0;
+		xsk_frames += !xdp_ring->xdp_sqes[ntc].type ? 1 : 0;
 		libeth_xdp_complete_tx(&xdp_ring->xdp_sqes[ntc], &cp);
 		ntc++;
 		ntc = unlikely(ntc == xdp_ring->count) ? 0 : ntc;
@@ -37,7 +36,7 @@ static inline void ixgbevf_clean_xdp_num(struct ixgbevf_ring *xdp_ring,
 
 	xdp_ring->next_to_clean = ntc;
 	xdp_flush_frame_bulk(&cbulk);
-	if (xsk_frames)
+	if (xsk_ring && xsk_frames)
 		xsk_tx_completed(xdp_ring->xsk_pool, xsk_frames);
 }
 
@@ -64,7 +63,8 @@ static inline u16 ixgbevf_xdp_complete(struct ixgbevf_ring *xdp_ring,
 
 		to_clean =
 			(idx >= ntc ? idx : idx + xdp_ring->count) - ntc + 1;
-		ixgbevf_clean_xdp_num(xdp_ring, false, to_clean);
+		ixgbevf_clean_xdp_num(xdp_ring, false, to_clean,
+				      ring_is_xsk(xdp_ring));
 		cleaned += to_clean;
 
 		ntc = xdp_ring->next_to_clean;
@@ -79,7 +79,9 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 
 	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
 	if (unlikely(ixgbevf_desc_unused(xdp_ring) < xdp_ring->thresh))
-		ixgbevf_xdp_complete(xdpsq, xdp_ring->pending);
+		ixgbevf_xdp_complete(xdp_ring,
+				     min_t(u32, xdp_ring->complete_budget,
+					   xdp_ring->pending));
 
 	if (unlikely(!test_bit(__IXGBEVF_TX_XDP_RING_PRIMED,
 			       &xdp_ring->state))) {
