@@ -835,7 +835,7 @@ static int ixgbevf_xdp_xmit(struct net_device *dev, int n,
 	return libeth_xdp_xmit_do_bulk(dev, n, frames, flags, adapter->xdp_ring,
 				       adapter->num_xdp_queues,
 				       ixgbevf_xdp_flush_xmit,
-				       ixgbevf_xdp_rs_and_bump);
+				       ixgbevf_xdp_finalize);
 }
 
 /**
