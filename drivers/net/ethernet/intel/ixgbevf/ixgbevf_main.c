@@ -1588,7 +1588,7 @@ void ixgbevf_rx_destroy_pp(struct ixgbevf_ring *rx_ring)
 		.fqes	= rx_ring->rx_fqes,
 	};
 
-	if (!fq.pp && !rx_ring->xsk_fqes)
+	if (!fq.pp && !rx_ring->xsk_pool)
 		return;
 
 	if (xdp_rxq_info_is_reg(&rx_ring->xdp_rxq)) {
