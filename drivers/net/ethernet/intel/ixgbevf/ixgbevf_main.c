@@ -1699,7 +1699,7 @@ static void ixgbevf_configure_rx_ring(struct ixgbevf_adapter *adapter,
 	err = ixgbevf_rx_create_pp(ring);
 	if (err) {
 		netdev_err(ring->netdev,
-			   "Failed to create Page Pool for buffer allocation: (%pe), RxQ %d is disabled, driver reload may be needed\n",
+			   "Failed to create Page Pool for buffer allocation: (%pe), RxQ %d is disabled, reopen the interface to retry\n",
 			   ERR_PTR(err), ring->queue_index);
 		return;
 	}
