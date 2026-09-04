@@ -2450,6 +2450,7 @@ static int ixgbevf_alloc_q_vector(struct ixgbevf_adapter *adapter, int v_idx,
 
 	while (rxr_count) {
 		/* assign generic ring traits */
+		ring->dev = &adapter->pdev->dev;
 		ring->netdev = adapter->netdev;
 
 		/* configure backlink on ring */
@@ -3164,8 +3165,8 @@ int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 
 	if (!rx_ring->desc) {
 		ret = -ENOMEM;
-		dev_err(&adapter->pdev->dev,
-			"Unable to allocate memory for the Rx descriptor ring\n");
+		netdev_err(adapter->netdev,
+			   "Unable to allocate memory for the Rx descriptor ring\n");
 		goto destroy_fq;
 	}
 
@@ -3182,7 +3183,7 @@ int ixgbevf_setup_rx_resources(struct ixgbevf_adapter *adapter,
 	return 0;
 
 free_desc:
-	dma_free_coherent(fq.pp->p.dev, rx_ring->size, rx_ring->desc,
+	dma_free_coherent(rx_ring->dev, rx_ring->size, rx_ring->desc,
 			  rx_ring->dma);
 	rx_ring->desc = NULL;
 destroy_fq:
@@ -3241,7 +3242,7 @@ void ixgbevf_free_rx_resources(struct ixgbevf_ring *rx_ring)
 	xdp_rxq_info_detach_mem_model(&rx_ring->xdp_rxq);
 	xdp_rxq_info_unreg(&rx_ring->xdp_rxq);
 
-	dma_free_coherent(fq.pp->p.dev, rx_ring->size, rx_ring->desc,
+	dma_free_coherent(rx_ring->dev, rx_ring->size, rx_ring->desc,
 			  rx_ring->dma);
 	rx_ring->desc = NULL;
 
