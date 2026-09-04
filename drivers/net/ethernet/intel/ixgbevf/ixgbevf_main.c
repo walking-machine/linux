@@ -1360,6 +1360,11 @@ void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 	ring->pending = 0;
 	ring->cached_ntu = 0;
 
+	/* set_ringparams() path invalidates any self-pointers */
+	if (ring_is_xdp(ring))
+		libeth_xdpsq_init_timer(ring->xdp_timer, ring, &ring->xdpq_lock,
+					ixgbevf_xdp_task);
+
 	/* In order to avoid issues WTHRESH + PTHRESH should always be equal
 	 * to or less than the number of on chip descriptors, which is
 	 * currently 40.
