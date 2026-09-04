@@ -97,7 +97,6 @@ struct ixgbevf_ring {
 		struct ixgbevf_tx_buffer *tx_buffer_info;
 		struct libeth_sqe *xdp_sqes;
 	};
-	struct libeth_xdpsq_lock xdpq_lock;
 	u32 cached_ntu;
 	unsigned long state;
 	struct ixgbevf_stats stats;
@@ -106,6 +105,8 @@ struct ixgbevf_ring {
 		struct ixgbevf_tx_queue_stats tx_stats;
 		struct ixgbevf_rx_queue_stats rx_stats;
 	};
+	struct libeth_xdpsq_lock xdpq_lock;
+	struct libeth_xdpsq_timer *xdp_timer;
 	struct xdp_rxq_info xdp_rxq;
 	struct libeth_xdp_buff_stash xdp_stash;
 	u64 hw_csum_rx_error;
@@ -118,7 +119,6 @@ struct ixgbevf_ring {
 	int queue_index; /* needed for multiqueue queue management */
 	unsigned int dma_size;		/* length in bytes */
 	dma_addr_t dma;			/* phys. address of descriptor ring */
-	struct libeth_xdpsq_timer *xdp_timer;
 } ____cacheline_internodealigned_in_smp;
 
 /* How many Rx Buffers do we bundle into one write to the hardware ? */
