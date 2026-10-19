@@ -698,12 +698,13 @@ static u32 ixgbevf_xdp_complete_late(void *xdpsq, u32 budget)
 
 LIBETH_XDP_DEFINE_START();
 LIBETH_XDP_DEFINE_FLUSH_TX(static ixgbevf_xdp_flush_tx, ixgbevf_prep_xdp_sq,
-			   ixgbevf_xdp_xmit_desc);
+			   ixgbevf_xdp_xmit_desc, LIBETH_XDP_TX_FULL);
 LIBETH_XDP_DEFINE_FINALIZE(static ixgbevf_xdp_finalize_xdp_napi,
 			   ixgbevf_xdp_flush_tx, ixgbevf_xdp_finalize);
 LIBETH_XDP_DEFINE_FLUSH_XMIT(static ixgbevf_xdp_flush_xmit, ixgbevf_prep_xdp_sq,
-			     ixgbevf_xdp_xmit_desc);
-LIBETH_XDP_DEFINE_RUN_PROG(static ixgbevf_xdp_run_prog, ixgbevf_xdp_flush_tx);
+			     ixgbevf_xdp_xmit_desc, LIBETH_XDP_TX_FULL);
+LIBETH_XDP_DEFINE_RUN_PROG(static ixgbevf_xdp_run_prog,
+			   ixgbevf_xdp_flush_tx, LIBETH_XDP_TX_FULL);
 LIBETH_XDP_DEFINE_TIMER(static ixgbevf_xdp_task, ixgbevf_xdp_complete_late);
 LIBETH_XDP_DEFINE_END();
 
@@ -862,13 +863,11 @@ static int ixgbevf_xdp_xmit(struct net_device *dev, int n,
 	if (unlikely(test_bit(__IXGBEVF_DOWN, &adapter->state)))
 		return -ENETDOWN;
 
-	if (unlikely(!adapter->num_xdp_queues))
-		return -ENXIO;
-
 	return libeth_xdp_xmit_do_bulk(dev, n, frames, flags, adapter->xdp_ring,
 				       adapter->num_xdp_queues,
 				       ixgbevf_xdp_flush_xmit,
-				       ixgbevf_xdp_finalize);
+				       ixgbevf_xdp_finalize,
+				       LIBETH_XDP_TX_FULL);
 }
 
 /**

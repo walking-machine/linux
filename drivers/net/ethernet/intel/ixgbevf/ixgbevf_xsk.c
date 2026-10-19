@@ -219,8 +219,9 @@ static void ixgbevf_xsk_xmit_desc(struct libeth_xdp_tx_desc desc, u32 i,
 
 LIBETH_XDP_DEFINE_START();
 LIBETH_XSK_DEFINE_FLUSH_TX(static ixgbevf_xsk_flush_tx, ixgbevf_prep_xdp_sq,
-			   ixgbevf_xsk_xmit_desc);
-LIBETH_XSK_DEFINE_RUN_PROG(static ixgbevf_xsk_run_prog, ixgbevf_xsk_flush_tx);
+			   ixgbevf_xsk_xmit_desc, LIBETH_XDP_TX_FULL);
+LIBETH_XSK_DEFINE_RUN_PROG(static ixgbevf_xsk_run_prog, ixgbevf_xsk_flush_tx,
+			   LIBETH_XDP_TX_FULL);
 LIBETH_XSK_DEFINE_FINALIZE(static ixgbevf_xsk_finalize_xdp_napi,
 			   ixgbevf_xsk_flush_tx, ixgbevf_xdp_rs_and_bump);
 LIBETH_XDP_DEFINE_END();

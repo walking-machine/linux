@@ -130,9 +130,7 @@ void __cold libeth_xdp_tx_exception(struct libeth_xdp_tx_bulk *bq, u32 sent,
 		libeth_trace_xdp_exception(bq->dev, bq->prog, XDP_TX);
 
 	if (!(flags & LIBETH_XDP_TX_DROP)) {
-		memmove(bq->bulk, pos, left * sizeof(*bq->bulk));
-		bq->count = left;
-
+		libeth_xdp_tx_update_bulk(bq, sent);
 		return;
 	}
 
