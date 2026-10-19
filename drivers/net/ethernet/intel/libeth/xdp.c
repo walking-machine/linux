@@ -126,7 +126,8 @@ void __cold libeth_xdp_tx_exception(struct libeth_xdp_tx_bulk *bq, u32 sent,
 	const struct libeth_xdp_tx_frame *pos = &bq->bulk[sent];
 	u32 left = bq->count - sent;
 
-	if (!(flags & LIBETH_XDP_TX_NDO))
+	if (!(flags & LIBETH_XDP_TX_NDO) &&
+	    (flags & LIBETH_XDP_TX_DROP || !sent))
 		libeth_trace_xdp_exception(bq->dev, bq->prog, XDP_TX);
 
 	if (!(flags & LIBETH_XDP_TX_DROP)) {
