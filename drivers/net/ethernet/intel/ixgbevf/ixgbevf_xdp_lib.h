@@ -123,7 +123,7 @@ static inline u32 ixgbevf_prep_xdp_sq(void *xdpsq, struct libeth_xdpsq *sq)
 	libeth_xdpsq_lock(&xdp_ring->xdpq_lock);
 	if (unlikely(ixgbevf_desc_unused(xdp_ring) < xdp_ring->thresh))
 		ixgbevf_xdp_complete(xdp_ring,
-				     min_t(u32, xdp_ring->complete_budget,
+				     min_t(u32, xdp_ring->thresh,
 					   xdp_ring->pending));
 
 	ixgbevf_prep_xsk_sq(xdpsq, sq);

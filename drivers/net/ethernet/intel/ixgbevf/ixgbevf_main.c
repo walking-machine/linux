@@ -1385,10 +1385,7 @@ void ixgbevf_configure_tx_ring(struct ixgbevf_adapter *adapter,
 	else
 		clear_ring_xsk(ring);
 
-	ring->thresh = ring_is_xsk(ring) ? IXGBEVF_XSK_TX_CLEAN_THRESH(ring) :
-					   libeth_xdp_queue_threshold(ring->count);
-	ring->complete_budget = ring_is_xsk(ring) ?
-				IXGBEVF_XSK_TX_CLEAN_BUDGET : ring->thresh;
+	ring->thresh = libeth_xdp_queue_threshold(ring->count);
 
 	clear_bit(__IXGBEVF_HANG_CHECK_ARMED, &ring->state);
 	clear_bit(__IXGBEVF_TX_XDP_RING_PRIMED, &ring->state);
