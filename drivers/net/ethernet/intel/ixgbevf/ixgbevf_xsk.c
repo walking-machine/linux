@@ -336,10 +336,7 @@ bool ixgbevf_clean_xsk_tx_irq(struct ixgbevf_q_vector *q_vector,
 	u32 budget = min_t(u32, napi_budget, tx_ring->thresh);
 
 	libeth_xdpsq_lock(&tx_ring->xdpq_lock);
-	if (unlikely(ixgbevf_desc_unused(tx_ring) < tx_ring->thresh))
-		ixgbevf_xdp_complete(tx_ring,
-				     min_t(u32, tx_ring->complete_budget,
-					   tx_ring->pending));
+	ixgbevf_xdp_complete(tx_ring, tx_ring->pending);
 
 	budget = min_t(u32, budget, ixgbevf_desc_unused(tx_ring));
 
