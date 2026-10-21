@@ -280,6 +280,7 @@ libeth_xdpsq_run_timer(struct work_struct *work,
  * @LIBETH_XDP_TX_DROP: indicates the send function must drop frames not sent
  * @LIBETH_XDP_TX_NDO: whether the send function is called from .ndo_xdp_xmit()
  * @LIBETH_XDP_TX_XSK: whether the function is called for ``XDP_TX`` for XSk
+ * @LIBETH_XDP_TX_FULL_PKT: never place partial packets on the queue
  */
 enum {
 	LIBETH_XDP_TX_BULK		= DEV_MAP_BULK_SIZE,
@@ -288,6 +289,7 @@ enum {
 	LIBETH_XDP_TX_DROP		= BIT(0),
 	LIBETH_XDP_TX_NDO		= BIT(1),
 	LIBETH_XDP_TX_XSK		= BIT(2),
+	LIBETH_XDP_TX_FULL_PKT		= BIT(3),
 };
 
 /**
@@ -496,9 +498,12 @@ struct libeth_xdp_tx_desc {
  * @xdpsq: pointer to the driver-specific XDPSQ struct
  * @n: number of frames to send
  * @unroll: whether to unroll the queue filling loop for speed
+ * @full_pkt: send only complete packets, see %LIBETH_XDP_TX_FULL_PKT
  * @priv: driver-specific private data
  * @prep: callback for cleaning the queue and filling abstract &libeth_xdpsq
  * @fill: internal callback for filling &libeth_sqe and &libeth_xdp_tx_desc
+ * @is_eop: internal callback to check whether a frame ends a packet,
+ *	    used only when @full_pkt is true
  * @xmit: callback for filling a HW descriptor with the frame info
  *
  * Internal abstraction for placing @n XDP Tx frames on the HW XDPSQ. Used for
@@ -515,11 +520,12 @@ struct libeth_xdp_tx_desc {
  */
 static __always_inline __nocfi_generic u32
 libeth_xdp_tx_xmit_bulk(const struct libeth_xdp_tx_frame *bulk, void *xdpsq,
-			u32 n, bool unroll, u64 priv,
+			u32 n, bool unroll, bool full_pkt, u64 priv,
 			u32 (*prep)(void *xdpsq, struct libeth_xdpsq *sq),
 			struct libeth_xdp_tx_desc
 			(*fill)(struct libeth_xdp_tx_frame frm, u32 i,
 				const struct libeth_xdpsq *sq, u64 priv),
+			bool (*is_eop)(const struct libeth_xdp_tx_frame *frm),
 			void (*xmit)(struct libeth_xdp_tx_desc desc, u32 i,
 				     const struct libeth_xdpsq *sq, u64 priv))
 {
@@ -528,6 +534,8 @@ libeth_xdp_tx_xmit_bulk(const struct libeth_xdp_tx_frame *bulk, void *xdpsq,
 	u32 ntu, i = 0;
 
 	n = min(n, prep(xdpsq, &sq));
+	while (full_pkt && n && !is_eop(&bulk[n - 1]))
+		n--;
 	if (unlikely(!n))
 		goto unlock;
 
@@ -625,11 +633,18 @@ static inline void libeth_xdp_tx_queue_frag(struct libeth_xdp_tx_bulk *bq,
 	bq->bulk[bq->count++].frag = *frag;
 }
 
+static inline bool
+libeth_xdp_tx_is_eop(const struct libeth_xdp_tx_frame *frm)
+{
+	return frm->len_fl & LIBETH_XDP_TX_LAST;
+}
+
 /**
  * libeth_xdp_tx_queue_bulk - internal helper for queueing one ``XDP_TX`` frame
  * @bq: XDP Tx bulk to queue the frame to
  * @xdp: XDP buffer to queue
  * @flush_bulk: driver callback to flush the bulk to the HW queue
+ * @flags: additional static flags, %LIBETH_XDP_TX_FULL_PKT or none
  *
  * Return: true on success, false on flush error.
  */
@@ -637,14 +652,15 @@ static __always_inline bool
 libeth_xdp_tx_queue_bulk(struct libeth_xdp_tx_bulk *bq,
 			 struct libeth_xdp_buff *xdp,
 			 bool (*flush_bulk)(struct libeth_xdp_tx_bulk *bq,
-					    u32 flags))
+					    u32 flags),
+			 u32 flags)
 {
 	const struct skb_shared_info *sinfo;
 	bool ret = true;
-	u32 nr_frags;
+	u32 nr_frags, i;
 
 	if (unlikely(bq->count == LIBETH_XDP_TX_BULK) &&
-	    unlikely(!flush_bulk(bq, 0))) {
+	    unlikely(!flush_bulk(bq, flags))) {
 		libeth_xdp_return_buff_slow(xdp);
 		return false;
 	}
@@ -655,14 +671,20 @@ libeth_xdp_tx_queue_bulk(struct libeth_xdp_tx_bulk *bq,
 	sinfo = xdp_get_shared_info_from_buff(&xdp->base);
 	nr_frags = sinfo->nr_frags;
 
-	for (u32 i = 0; i < nr_frags; i++) {
+	for (i = 0; i < nr_frags; i++) {
 		if (unlikely(bq->count == LIBETH_XDP_TX_BULK) &&
-		    unlikely(!flush_bulk(bq, 0))) {
+		    unlikely(!flush_bulk(bq, flags))) {
 			ret = false;
 			break;
 		}
 
 		libeth_xdp_tx_queue_frag(bq, &sinfo->frags[i]);
+	}
+
+	if (flags & LIBETH_XDP_TX_FULL_PKT && unlikely(i < nr_frags)) {
+		libeth_xdp_return_buff_slow(xdp);
+		bq->count -= i + 1;
+		return ret;
 	}
 
 out:
@@ -758,8 +780,10 @@ void libeth_xdp_tx_exception(struct libeth_xdp_tx_bulk *bq, u32 sent,
  * __libeth_xdp_tx_flush_bulk - internal helper to flush one XDP Tx bulk
  * @bq: bulk to flush
  * @flags: XDP TX flags (.ndo_xdp_xmit(), XSk etc.)
+ * @full_pkt: send only complete packets, see %LIBETH_XDP_TX_FULL_PKT
  * @prep: driver-specific callback to prepare the queue for sending
  * @fill: libeth_xdp callback to fill &libeth_sqe and &libeth_xdp_tx_desc
+ * @is_eop: libeth_xdp callback to check whether a frame ends a packet
  * @xmit: driver callback to fill a HW descriptor
  *
  * Internal abstraction to create bulk flush functions for drivers. Used for
@@ -769,10 +793,12 @@ void libeth_xdp_tx_exception(struct libeth_xdp_tx_bulk *bq, u32 sent,
  */
 static __always_inline bool
 __libeth_xdp_tx_flush_bulk(struct libeth_xdp_tx_bulk *bq, u32 flags,
+			   bool full_pkt,
 			   u32 (*prep)(void *xdpsq, struct libeth_xdpsq *sq),
 			   struct libeth_xdp_tx_desc
 			   (*fill)(struct libeth_xdp_tx_frame frm, u32 i,
 				   const struct libeth_xdpsq *sq, u64 priv),
+			   bool (*is_eop)(const struct libeth_xdp_tx_frame *frm),
 			   void (*xmit)(struct libeth_xdp_tx_desc desc, u32 i,
 					const struct libeth_xdpsq *sq,
 					u64 priv))
@@ -782,7 +808,8 @@ __libeth_xdp_tx_flush_bulk(struct libeth_xdp_tx_bulk *bq, u32 flags,
 
 	sent = libeth_xdp_tx_xmit_bulk(bq->bulk, bq->xdpsq,
 				       min(bq->count, LIBETH_XDP_TX_BULK),
-				       false, 0, prep, fill, xmit);
+				       false, full_pkt, 0, prep, fill, is_eop,
+				       xmit);
 	drops = bq->count - sent;
 
 	if (unlikely(drops)) {
@@ -801,15 +828,17 @@ __libeth_xdp_tx_flush_bulk(struct libeth_xdp_tx_bulk *bq, u32 flags,
  * libeth_xdp_tx_flush_bulk - wrapper to define flush of one ``XDP_TX`` bulk
  * @bq: bulk to flush
  * @flags: Tx flags, see above
+ * @full_pkt: send only complete packets, see %LIBETH_XDP_TX_FULL_PKT
  * @prep: driver callback to prepare the queue
  * @xmit: driver callback to fill a HW descriptor
  *
  * Use via LIBETH_XDP_DEFINE_FLUSH_TX() to define an ``XDP_TX`` driver
  * callback.
  */
-#define libeth_xdp_tx_flush_bulk(bq, flags, prep, xmit)			      \
-	__libeth_xdp_tx_flush_bulk(bq, flags, prep, libeth_xdp_tx_fill_buf,   \
-				   xmit)
+#define libeth_xdp_tx_flush_bulk(bq, flags, full_pkt, prep, xmit)	      \
+	__libeth_xdp_tx_flush_bulk(bq, flags, full_pkt, prep,		      \
+				   libeth_xdp_tx_fill_buf,		      \
+				   libeth_xdp_tx_is_eop, xmit)
 
 /* .ndo_xdp_xmit() implementation */
 
@@ -922,11 +951,15 @@ static inline bool libeth_xdp_xmit_queue_frag(struct libeth_xdp_tx_bulk *bq,
 	return true;
 }
 
+u32 libeth_xdp_xmit_return_bulk(const struct libeth_xdp_tx_frame *bq,
+				u32 count, const struct net_device *dev);
+
 /**
  * libeth_xdp_xmit_queue_bulk - internal helper for queueing one XDP xmit frame
  * @bq: XDP Tx bulk to queue the frame to
  * @xdpf: XDP frame to queue
  * @flush_bulk: driver callback to flush the bulk to the HW queue
+ * @flags: additional static flags, %LIBETH_XDP_TX_FULL_PKT or none
  *
  * Return: ``LIBETH_XDP_TX`` on success,
  *	   ``LIBETH_XDP_DROP`` if the frame should be dropped by the stack,
@@ -936,7 +969,8 @@ static __always_inline u32
 libeth_xdp_xmit_queue_bulk(struct libeth_xdp_tx_bulk *bq,
 			   struct xdp_frame *xdpf,
 			   bool (*flush_bulk)(struct libeth_xdp_tx_bulk *bq,
-					      u32 flags))
+					      u32 flags),
+			   u32 flags)
 {
 	u32 head, nr_frags, i, ret = LIBETH_XDP_TX;
 	struct device *dev = bq->dev->dev.parent;
@@ -964,8 +998,15 @@ libeth_xdp_xmit_queue_bulk(struct libeth_xdp_tx_bulk *bq,
 			break;
 	}
 
-	if (unlikely(i < nr_frags))
+	if (unlikely(i < nr_frags)) {
+		if (flags & LIBETH_XDP_TX_FULL_PKT) {
+			bq->count -= i + 1;
+			libeth_xdp_xmit_return_bulk(&bq->bulk[bq->count],
+						    i + 1, bq->dev);
+			return LIBETH_XDP_DROP;
+		}
 		ret = LIBETH_XDP_ABORTED;
+	}
 
 out:
 	bq->bulk[bq->count - 1].flags |= LIBETH_XDP_TX_LAST;
@@ -1017,22 +1058,27 @@ libeth_xdp_xmit_fill_buf(struct libeth_xdp_tx_frame frm, u32 i,
 	return desc;
 }
 
+static inline bool
+libeth_xdp_xmit_is_eop(const struct libeth_xdp_tx_frame *frm)
+{
+	return frm->flags & LIBETH_XDP_TX_LAST;
+}
+
 /**
  * libeth_xdp_xmit_flush_bulk - wrapper to define flush of one XDP xmit bulk
  * @bq: bulk to flush
  * @flags: Tx flags, see __libeth_xdp_tx_flush_bulk()
+ * @full_pkt: send only complete packets, see %LIBETH_XDP_TX_FULL_PKT
  * @prep: driver callback to prepare the queue
  * @xmit: driver callback to fill a HW descriptor
  *
  * Use via LIBETH_XDP_DEFINE_FLUSH_XMIT() to define an XDP xmit driver
  * callback.
  */
-#define libeth_xdp_xmit_flush_bulk(bq, flags, prep, xmit)		      \
-	__libeth_xdp_tx_flush_bulk(bq, (flags) | LIBETH_XDP_TX_NDO, prep,     \
-				   libeth_xdp_xmit_fill_buf, xmit)
-
-u32 libeth_xdp_xmit_return_bulk(const struct libeth_xdp_tx_frame *bq,
-				u32 count, const struct net_device *dev);
+#define libeth_xdp_xmit_flush_bulk(bq, flags, full_pkt, prep, xmit)	      \
+	__libeth_xdp_tx_flush_bulk(bq, (flags) | LIBETH_XDP_TX_NDO, full_pkt, \
+				   prep, libeth_xdp_xmit_fill_buf,	      \
+				   libeth_xdp_xmit_is_eop, xmit)
 
 /**
  * __libeth_xdp_xmit_do_bulk - internal function to implement .ndo_xdp_xmit()
@@ -1042,6 +1088,8 @@ u32 libeth_xdp_xmit_return_bulk(const struct libeth_xdp_tx_frame *bq,
  * @flags: flags passed by the stack
  * @flush_bulk: driver callback to flush an XDP xmit bulk
  * @finalize: driver callback to finalize sending XDP Tx frames on the queue
+ * @libeth_flags: additional static flags, %LIBETH_XDP_TX_FULL_PKT or none,
+ *		  same as used in @flush_bulk definition
  *
  * Perform common checks, map the frags and queue them to the bulk, then flush
  * the bulk to the XDPSQ. If requested by the stack, finalize the queue.
@@ -1053,7 +1101,8 @@ __libeth_xdp_xmit_do_bulk(struct libeth_xdp_tx_bulk *bq,
 			  struct xdp_frame **frames, u32 n, u32 flags,
 			  bool (*flush_bulk)(struct libeth_xdp_tx_bulk *bq,
 					     u32 flags),
-			  void (*finalize)(void *xdpsq, bool sent, bool flush))
+			  void (*finalize)(void *xdpsq, bool sent, bool flush),
+			  u32 libeth_flags)
 {
 	u32 nxmit = 0;
 
@@ -1063,7 +1112,8 @@ __libeth_xdp_xmit_do_bulk(struct libeth_xdp_tx_bulk *bq,
 	for (u32 i = 0; likely(i < n); i++) {
 		u32 ret;
 
-		ret = libeth_xdp_xmit_queue_bulk(bq, frames[i], flush_bulk);
+		ret = libeth_xdp_xmit_queue_bulk(bq, frames[i], flush_bulk,
+						 libeth_flags);
 		if (unlikely(ret != LIBETH_XDP_TX)) {
 			nxmit += ret == LIBETH_XDP_ABORTED;
 			break;
@@ -1094,7 +1144,7 @@ __libeth_xdp_xmit_do_bulk(struct libeth_xdp_tx_bulk *bq,
  * @xqs: array of XDPSQs driver structs
  * @nqs: number of active XDPSQs, the above array length
  * @fl: driver callback to flush an XDP xmit bulk
- * @fin: driver cabback to finalize the queue
+ * @fin: driver callback to finalize the queue
  *
  * If the driver has active XDPSQs, perform common checks and send the frames.
  * Finalize the queue, if requested.
@@ -1115,7 +1165,7 @@ __libeth_xdp_xmit_do_bulk(struct libeth_xdp_tx_bulk *bq,
 		LIBETH_XDP_ONSTACK_BULK(ub);				      \
 									      \
 		libeth_xdp_xmit_init_bulk(&ub, d, xqs, un);		      \
-		ur = __libeth_xdp_xmit_do_bulk(&ub, fr, n, f, fl, fin);	      \
+		ur = __libeth_xdp_xmit_do_bulk(&ub, fr, n, f, fl, fin, 0);    \
 	} else {							      \
 		ur = -ENXIO;						      \
 	}								      \
@@ -1392,6 +1442,7 @@ out:
  * @run: internal callback for running XDP program
  * @queue: internal callback for queuing ``XDP_TX`` frame
  * @flush_bulk: driver callback for flushing a bulk
+ * @flags: additional static flags passed to @queue
  *
  * Internal inline abstraction to run XDP program and additionally handle
  * ``XDP_TX`` verdict. Used by both XDP and XSk, hence @run and @queue.
@@ -1408,14 +1459,15 @@ __libeth_xdp_run_flush(struct libeth_xdp_buff *xdp,
 				     struct libeth_xdp_buff *xdp,
 				     bool (*flush_bulk)
 					  (struct libeth_xdp_tx_bulk *bq,
-					   u32 flags)),
+					   u32 flags), u32 flags),
 		       bool (*flush_bulk)(struct libeth_xdp_tx_bulk *bq,
-					  u32 flags))
+					  u32 flags),
+		       u32 flags)
 {
 	u32 act;
 
 	act = run(xdp, bq);
-	if (act == LIBETH_XDP_TX && unlikely(!queue(bq, xdp, flush_bulk)))
+	if (act == LIBETH_XDP_TX && unlikely(!queue(bq, xdp, flush_bulk, flags)))
 		act = LIBETH_XDP_DROP;
 
 	bq->act_mask |= act;
@@ -1428,6 +1480,8 @@ __libeth_xdp_run_flush(struct libeth_xdp_buff *xdp,
  * @xdp: XDP buffer to process
  * @bq: XDP Tx bulk to queue ``XDP_TX`` buffers
  * @fl: driver ``XDP_TX`` bulk flush callback
+ * @fg: additional static flags, %LIBETH_XDP_TX_FULL_PKT or none,
+ *	same as used in @fl definition
  *
  * Run the attached XDP program and handle all possible verdicts. XSk has its
  * own version.
@@ -1436,10 +1490,10 @@ __libeth_xdp_run_flush(struct libeth_xdp_buff *xdp,
  * Return: true if the buffer should be passed up the stack, false if the poll
  * should go to the next buffer.
  */
-#define libeth_xdp_run_prog(xdp, bq, fl)				      \
+#define libeth_xdp_run_prog(xdp, bq, fl, fg)				      \
 	(__libeth_xdp_run_flush(xdp, bq, __libeth_xdp_run_prog,		      \
 				libeth_xdp_tx_queue_bulk,		      \
-				fl) == LIBETH_XDP_PASS)
+				fl, fg) == LIBETH_XDP_PASS)
 
 /**
  * __libeth_xdp_run_pass - helper to run XDP program and handle the result
@@ -1611,12 +1665,14 @@ void name(struct work_struct *work)					      \
  * @xmit: driver callback to write a HW Tx descriptor
  */
 #define LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit)			      \
-	__LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, xdp)
+	__LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, 0, xdp)
 
-#define __LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, pfx)		      \
+#define __LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, mode, pfx)	      \
 bool name(struct libeth_xdp_tx_bulk *bq, u32 flags)			      \
 {									      \
-	return libeth_##pfx##_tx_flush_bulk(bq, flags, prep, xmit);	      \
+	return libeth_##pfx##_tx_flush_bulk(bq, flags,			      \
+					    (mode) & LIBETH_XDP_TX_FULL_PKT,  \
+					    prep, xmit);		      \
 }
 
 /**
@@ -1626,9 +1682,14 @@ bool name(struct libeth_xdp_tx_bulk *bq, u32 flags)			      \
  * @xmit: driver callback to write a HW Tx descriptor
  */
 #define LIBETH_XDP_DEFINE_FLUSH_XMIT(name, prep, xmit)			      \
+	__LIBETH_XDP_DEFINE_FLUSH_XMIT(name, prep, xmit, 0)
+
+#define __LIBETH_XDP_DEFINE_FLUSH_XMIT(name, prep, xmit, mode)		      \
 bool name(struct libeth_xdp_tx_bulk *bq, u32 flags)			      \
 {									      \
-	return libeth_xdp_xmit_flush_bulk(bq, flags, prep, xmit);	      \
+	return libeth_xdp_xmit_flush_bulk(bq, flags,			      \
+					  (mode) & LIBETH_XDP_TX_FULL_PKT,    \
+					  prep, xmit);			      \
 }
 
 /**
@@ -1637,12 +1698,12 @@ bool name(struct libeth_xdp_tx_bulk *bq, u32 flags)			      \
  * @flush: driver callback to flush an ``XDP_TX`` bulk
  */
 #define LIBETH_XDP_DEFINE_RUN_PROG(name, flush)				      \
-	bool __LIBETH_XDP_DEFINE_RUN_PROG(name, flush, xdp)
+	bool __LIBETH_XDP_DEFINE_RUN_PROG(name, flush, 0, xdp)
 
-#define __LIBETH_XDP_DEFINE_RUN_PROG(name, flush, pfx)			      \
+#define __LIBETH_XDP_DEFINE_RUN_PROG(name, flush, fg, pfx)		      \
 name(struct libeth_xdp_buff *xdp, struct libeth_xdp_tx_bulk *bq)	      \
 {									      \
-	return libeth_##pfx##_run_prog(xdp, bq, flush);			      \
+	return libeth_##pfx##_run_prog(xdp, bq, flush, fg);		      \
 }
 
 /**
