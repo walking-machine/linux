@@ -335,8 +335,16 @@ bool ixgbevf_clean_xsk_tx_irq(struct ixgbevf_q_vector *q_vector,
 {
 	u32 budget = min_t(u32, napi_budget, tx_ring->thresh);
 
+	libeth_xdpsq_lock(&tx_ring->xdpq_lock);
+	if (unlikely(ixgbevf_desc_unused(tx_ring) < tx_ring->thresh))
+		ixgbevf_xdp_complete(tx_ring,
+				     min_t(u32, tx_ring->complete_budget,
+					   tx_ring->pending));
+
+	budget = min_t(u32, budget, ixgbevf_desc_unused(tx_ring));
+
 	return libeth_xsk_xmit_do_bulk(tx_ring->xsk_pool, tx_ring, budget,
-				       NULL, ixgbevf_prep_xdp_sq,
+				       NULL, ixgbevf_prep_xsk_sq,
 				       ixgbevf_xsk_xmit_desc,
 				       ixgbevf_xdp_rs_and_bump);
 }
