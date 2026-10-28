@@ -56,13 +56,15 @@ static inline void libeth_xsk_tx_queue_frag(struct libeth_xdp_tx_bulk *bq,
  * libeth_xsk_tx_queue_bulk - internal helper for queueing XSk ``XDP_TX`` frame
  * @bq: XDP Tx bulk to queue the frame to
  * @xdp: XSk buffer to queue
+ * @mode: additional static flags, %LIBETH_XDP_TX_FULL and/or
+ *	  %LIBETH_XDP_TX_UNROLL, or none
  * @flush_bulk: driver callback to flush the bulk to the HW queue
  *
  * Return: true on success, false on flush error.
  */
 static __always_inline bool
 libeth_xsk_tx_queue_bulk(struct libeth_xdp_tx_bulk *bq,
-			 struct libeth_xdp_buff *xdp,
+			 struct libeth_xdp_buff *xdp, u32 mode,
 			 bool (*flush_bulk)(struct libeth_xdp_tx_bulk *bq,
 					    u32 flags))
 {
@@ -90,6 +92,14 @@ libeth_xsk_tx_queue_bulk(struct libeth_xdp_tx_bulk *bq,
 		}
 
 		libeth_xsk_tx_queue_frag(bq, xdp);
+	}
+
+	if ((mode & LIBETH_XDP_TX_FULL) && unlikely(xdp)) {
+		while (bq->count &&
+		       !libeth_xdp_xmit_eop(&bq->bulk[bq->count - 1]))
+			libeth_xsk_buff_free_slow(bq->bulk[--bq->count].xsk);
+
+		return ret;
 	}
 
 out:
@@ -140,14 +150,17 @@ libeth_xsk_tx_fill_buf(struct libeth_xdp_tx_frame frm, u32 i,
  * libeth_xsk_tx_flush_bulk - wrapper to define flush of XSk ``XDP_TX`` bulk
  * @bq: bulk to flush
  * @flags: Tx flags, see __libeth_xdp_tx_flush_bulk()
+ * @mode: additional static flags, %LIBETH_XDP_TX_FULL and/or
+ *	  %LIBETH_XDP_TX_UNROLL, or none
  * @prep: driver callback to prepare the queue
  * @xmit: driver callback to fill a HW descriptor
  *
  * Use via LIBETH_XSK_DEFINE_FLUSH_TX() to define an XSk ``XDP_TX`` driver
  * callback.
  */
-#define libeth_xsk_tx_flush_bulk(bq, flags, prep, xmit)			     \
-	__libeth_xdp_tx_flush_bulk(bq, (flags) | LIBETH_XDP_TX_XSK, prep,    \
+#define libeth_xsk_tx_flush_bulk(bq, flags, mode, prep, xmit)		     \
+	__libeth_xdp_tx_flush_bulk(bq, (flags) | LIBETH_XDP_TX_XSK, mode,    \
+				   prep, libeth_xdp_xmit_eop,		     \
 				   libeth_xsk_tx_fill_buf, xmit)
 
 /* XSk TMO */
@@ -300,8 +313,8 @@ libeth_xsk_xmit_do_bulk(struct xsk_buff_pool *pool, void *xdpsq, u32 budget,
 	n = xsk_tx_peek_release_desc_batch(pool, budget);
 	bulk = container_of(&pool->tx_descs[0], typeof(*bulk), desc);
 
-	libeth_xdp_tx_xmit_bulk(bulk, xdpsq, n, true,
-				libeth_xdp_ptr_to_priv(tmo), prep,
+	libeth_xdp_tx_xmit_bulk(bulk, xdpsq, n, LIBETH_XDP_TX_UNROLL,
+				libeth_xdp_ptr_to_priv(tmo), prep, NULL,
 				libeth_xsk_xmit_fill_buf, xmit);
 	finalize(xdpsq, n, true);
 
@@ -409,6 +422,9 @@ rest:
  * libeth_xsk_run_prog - run XDP program on XSk path and handle all verdicts
  * @xdp: XSk buffer to process
  * @bq: XDP Tx bulk to queue ``XDP_TX`` buffers
+ * @md: additional static flags, %LIBETH_XDP_TX_FULL and/or
+ *	%LIBETH_XDP_TX_UNROLL, or none,
+ *	same as used in @fl definition
  * @fl: driver ``XDP_TX`` bulk flush callback
  *
  * Run the attached XDP program and handle all possible verdicts.
@@ -416,8 +432,8 @@ rest:
  *
  * Return: libeth_xdp prog verdict depending on the prog's verdict.
  */
-#define libeth_xsk_run_prog(xdp, bq, fl)				     \
-	__libeth_xdp_run_flush(xdp, bq, __libeth_xsk_run_prog,		     \
+#define libeth_xsk_run_prog(xdp, bq, md, fl)				     \
+	__libeth_xdp_run_flush(xdp, bq, md, __libeth_xsk_run_prog,	     \
 			       libeth_xsk_tx_queue_bulk, fl)
 
 /**
@@ -544,17 +560,21 @@ __libeth_xsk_run_pass(struct libeth_xdp_buff *xdp,
  * @name: name of the function to define
  * @prep: driver callback to clean an XDPSQ
  * @xmit: driver callback to write a HW Tx descriptor
+ * @...: optional static flags, %LIBETH_XDP_TX_FULL and/or
+ *	 %LIBETH_XDP_TX_UNROLL, or none
  */
-#define LIBETH_XSK_DEFINE_FLUSH_TX(name, prep, xmit)			     \
-	__LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, xsk)
+#define LIBETH_XSK_DEFINE_FLUSH_TX(name, prep, xmit, ...)		      \
+	__LIBETH_XDP_DEFINE_FLUSH_TX(name, prep, xmit, xsk, ##__VA_ARGS__)
 
 /**
  * LIBETH_XSK_DEFINE_RUN_PROG - define a driver XDP program run function
  * @name: name of the function to define
  * @flush: driver callback to flush an XSk ``XDP_TX`` bulk
+ * @...: optional static flags, %LIBETH_XDP_TX_FULL and/or
+ *	 %LIBETH_XDP_TX_UNROLL, or none, same as used in @flush definition
  */
-#define LIBETH_XSK_DEFINE_RUN_PROG(name, flush)				     \
-	u32 __LIBETH_XDP_DEFINE_RUN_PROG(name, flush, xsk)
+#define LIBETH_XSK_DEFINE_RUN_PROG(name, flush, ...)			     \
+	u32 __LIBETH_XDP_DEFINE_RUN_PROG(name, flush, xsk, ##__VA_ARGS__)
 
 /**
  * LIBETH_XSK_DEFINE_RUN_PASS - define a driver buffer process + pass function
